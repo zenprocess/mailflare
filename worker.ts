@@ -37,10 +37,17 @@ import { runAccountRetention } from "./src/lib/accounts/deletion";
 import { runJmapChangeRetention } from "./src/lib/jmap/changes";
 import { runFollowUpReminders } from "./src/lib/follow-ups/service";
 import { runCalendarReminders } from "./src/lib/calendar/reminders";
+import { applyAccessGate, withAccessSessionCookie } from "./src/lib/auth/access/gate";
 export { RealtimeHub } from "./src/lib/realtime/hub";
 
 export default {
-	async fetch(request: Request, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+	async fetch(incoming: Request, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+		// Cloudflare Access sign-in (ACCESS_TEAM_DOMAIN + ACCESS_AUD set): verify the Access JWT and
+		// bind it to a Mailflare session before anything else runs. See docs/zp-access.md.
+		const access = await applyAccessGate(incoming, withDatabase(withStorage(rawEnv)));
+		if (access.kind === "response") return access.response;
+		const request = access.kind === "pass" ? access.request : incoming;
+		const accessCookie = access.kind === "pass" ? access.setCookie : undefined;
 		// Reads go through a D1 session anchored at the client's bookmark cookie so D1 can serve
 		// them from read replicas; email/queue/scheduled below keep primary reads on purpose.
 		const d1Session = withD1ReadSession(rawEnv, request);
@@ -66,7 +73,7 @@ export default {
 		}
 
 		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(request, env, ctx));
-		return withD1BookmarkCookie(request, response, d1Session?.session);
+		return withAccessSessionCookie(withD1BookmarkCookie(request, response, d1Session?.session), accessCookie);
 	},
 
 	async email(message: ForwardableEmailMessage, rawEnv: CloudflareEnv, ctx: ExecutionContext) {

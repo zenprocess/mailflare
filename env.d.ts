@@ -67,6 +67,24 @@ interface CloudflareEnv {
 	CF_API_KEY?: string;
 	CF_EMAIL?: string;
 	TURNSTILE_SECRET_KEY?: string;
+	/**
+	 * Cloudflare Access sign-in (docs/zp-access.md). Access mode is ON when both are set:
+	 * the team domain (example.cloudflareaccess.com) and the Access application AUD tag.
+	 */
+	ACCESS_TEAM_DOMAIN?: string;
+	ACCESS_AUD?: string;
+	/** Comma/space separated path prefixes reachable without an Access token (public links, signed webhooks). */
+	ACCESS_BYPASS_PATHS?: string;
+	/** Comma/space separated emails allowed to open /setup in Access mode. */
+	ACCESS_SETUP_EMAILS?: string;
+	/** "true" creates a passwordless account for an Access identity with no Mailflare account. */
+	ACCESS_AUTO_PROVISION?: string;
+	/** "true" keeps password sign-in and password reset available in Access mode. */
+	ACCESS_ALLOW_PASSWORD_LOGIN?: string;
+	/** "identity@idp=account@mailflare, ..." when the Access (Google) email differs from the Mailflare address. */
+	ACCESS_EMAIL_MAP?: string;
+	/** Comma/space separated domains the first-run registration may use; empty allows any zone the token sees. */
+	MAILFLARE_SETUP_DOMAINS?: string;
 	GITHUB_UPDATE_TOKEN?: string;
 	GITHUB_UPDATE_REF?: string;
 	GITHUB_UPDATE_REPO?: string;
