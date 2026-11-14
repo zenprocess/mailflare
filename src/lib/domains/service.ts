@@ -12,7 +12,7 @@ import {
 	listSendingSubdomains,
 	type CfDnsRecord,
 } from "@/lib/cloudflare-api";
-import { deleteEmailRoutingRulesForDomain } from "@/lib/domains/cloudflare-cleanup";
+import { deleteEmailRoutingRulesForDomain, zoneHasForeignRoutingRules } from "@/lib/domains/cloudflare-cleanup";
 import { isManualZone, provisionDomainOnCloudflare } from "@/lib/domains/provision";
 import { getManualDomainDns } from "@/lib/domains/manual-dns";
 import { rollbackDomainProvisioning } from "@/lib/domains/rollback";
@@ -222,6 +222,7 @@ export async function removeDomainForUser(
 	)).limit(1);
 	if (domain.routingEnabled && !otherDomainOnZone) {
 		try {
+			if (await zoneHasForeignRoutingRules(env, domain.zoneId)) throw new Error("Email Routing kept on: the zone has routing rules Mailflare did not create");
 			await disableEmailRouting(env, domain.zoneId);
 		} catch (err) {
 			console.warn("disableEmailRouting", err);

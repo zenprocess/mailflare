@@ -167,6 +167,8 @@ The assistant panel no longer exposes MCP key management. External MCP clients c
 
 ## Updating Mailflare
 
+> **Zen Labs fork:** self-update is removed (`deploy-update.yml` deleted, `POST /api/admin/update` answers 410). Deploys go through consul.zp.digital; see `docs/zp-access.md`.
+
 The **Update Mailflare** button in the admin dashboard dispatches `.github/workflows/deploy-update.yml` in the installation repository. The workflow replaces the installation branch's complete tracked tree with the latest upstream source, commits that replacement, and pushes it. This avoids merge conflicts between independently created installation and upstream histories. Target-only committed files and code changes are intentionally removed; repository variables, secrets, and other GitHub or Cloudflare configuration remain unchanged. A connected Cloudflare Git integration then builds and deploys the change.
 
 ### Auto update

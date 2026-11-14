@@ -12,7 +12,9 @@ export async function verifyTurnstileToken(
 	token: unknown,
 ): Promise<boolean> {
 	const secret = env.TURNSTILE_SECRET_KEY?.trim();
-	if (!secret) return true;
+	// Zen Labs fork (MAILFLARE-REVIEW.md 3.1/8.4): no secret means no check, so fail closed in
+	// production. Local development (NODE_ENV !== "production") keeps working without one.
+	if (!secret) return process.env.NODE_ENV !== "production";
 	if (typeof token !== "string" || !token.trim() || token.length > 2048) return false;
 
 	let response: Response;

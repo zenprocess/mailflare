@@ -43,6 +43,11 @@ export async function POST(request: Request) {
 	}
 
 	const domainName = firstRunParsed.data.domain.toLowerCase().trim();
+	// Zen Labs fork (MAILFLARE-REVIEW.md 8.4): the first-run domain may be pinned by the operator.
+	const allowedSetupDomains = (env.MAILFLARE_SETUP_DOMAINS ?? "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
+	if (allowedSetupDomains.length > 0 && !allowedSetupDomains.includes(domainName)) {
+		return NextResponse.json({ error: "This domain is not allowed for setup" }, { status: 400 });
+	}
 	const username = firstRunParsed.data.username.toLowerCase().trim();
 	const email = `${username}@${domainName}`;
 	const password = firstRunParsed.data.password;
@@ -92,7 +97,9 @@ export async function POST(request: Request) {
 		const added = await addDomainForUser(env, userId, domainName, {
 			enableRouting: true,
 			enableSending: firstRunParsed.data.enableSending ?? true,
-			replaceMxRecords: firstRunParsed.data.replaceMxRecords,
+			// Zen Labs fork (MAILFLARE-REVIEW.md 2/8.6): first run never deletes existing MX records;
+			// replacing a live zone's MX is an operator decision taken later, in the domain settings.
+			replaceMxRecords: false,
 			skipDns: firstRunParsed.data.skipDns,
 		});
 		const domain = added.domain;
