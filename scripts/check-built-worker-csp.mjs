@@ -69,6 +69,11 @@ function scriptSrcOf(csp) {
   return m ? m[1].trim() : "";
 }
 
+function imgSrcOf(csp) {
+  const m = /img-src([^;]*)/.exec(csp);
+  return m ? m[1].trim() : "";
+}
+
 const failures = [];
 function check(cond, msg) {
   console.log((cond ? "PASS " : "FAIL ") + msg);
@@ -107,6 +112,9 @@ async function main() {
     const ss = scriptSrcOf(doc.csp);
     check(ss.includes("'nonce-"), path + ": script-src has a nonce (got: " + ss + ")");
     check(!ss.includes("'unsafe-inline'"), path + ": script-src has no 'unsafe-inline' (got: " + ss + ")");
+    const isrc = imgSrcOf(doc.csp);
+    check(!/https:/.test(isrc), path + ": img-src has no https (got: " + isrc + ")");
+    check(isrc.includes("'self'") && isrc.includes("blob:"), path + ": img-src keeps 'self' and blob: (got: " + isrc + ")");
   }
 
   const shared = await head("/api/shared-files/mf3-check");

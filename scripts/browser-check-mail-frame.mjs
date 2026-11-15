@@ -38,6 +38,30 @@ function longBody() {
   return h;
 }
 
+// A message body with all three hostile-image shapes: an inline cid image (with a matching
+// attachment), a remote image, and a sender-chosen relative "../" same-origin path. Before the reader
+// clicks "Allow remote content" none of the remote/sender requests may leave the top document.
+const REMOTE_HOST = "img.example.net";
+const REMOTE_IMAGE_URL = "https://" + REMOTE_HOST + "/six.png";
+const SENDER_PATH = "/api/attachments/x?preview=1";
+
+function hostileBody() {
+  return longBody()
+    + '<img src="cid:logo" alt="cid" width="8" height="8">'
+    + '<img src="' + REMOTE_IMAGE_URL + '" alt="remote">'
+    + '<img src="../api/attachments/x?preview=1" alt="bogus">';
+}
+
+function isRemoteRequest(url) {
+  try { return new URL(url).hostname === REMOTE_HOST; } catch { return url.includes(REMOTE_HOST); }
+}
+function isSenderRequest(url) {
+  return url.includes(SENDER_PATH);
+}
+function isProxyRequest(url) {
+  return url.includes("/api/remote-images");
+}
+
 function runWrangler(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(wranglerBin, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
@@ -67,7 +91,7 @@ async function waitForReady(timeoutMs) {
 async function main() {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + 86400;
-  const htmlBody = longBody() + '<img src="cid:logo" alt="cid" width="8" height="8">';
+  const htmlBody = hostileBody();
   const insertSql = [
     "INSERT INTO users (id, email, password_hash, name, remote_content_mode, created_at) VALUES ('mf3-user', 'check@example.test', 'x', 'Check', 'ask', " + now + ");",
     "INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES ('mf3-sess', 'mf3-user', '" + tokenHash + "', " + exp + ", " + now + ");",
@@ -109,9 +133,30 @@ async function main() {
   page.on("console", (msg) => consoleMessages.push({ type: msg.type(), text: msg.text() }));
   page.on("pageerror", (err) => consoleMessages.push({ type: "pageerror", text: String(err) }));
 
+  // Log every request the page (top document or frame) attempts, so the regression can assert that
+  // the remote host and the sender-chosen path are never hit before consent.
+  const requests = [];
+  page.on("request", (req) => requests.push(req.url()));
+
+  // Mock the remote-image proxy so the SSRF-guarded fetch (DoH to Cloudflare) is never needed in
+  // this local run. The parent still issues the proxied request after consent — that is what the
+  // after-click assertion checks — but the response is a local 1×1 PNG instead of a network fetch.
+  const onePxPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await page.route("**/api/remote-images*", (route) => route.fulfill({ status: 200, contentType: "image/png", body: onePxPng }));
+
   await page.goto(base + "/inbox/mf3-msg", { waitUntil: "load", timeout: 30000 });
   await page.waitForSelector('iframe[title="message"]', { timeout: 20000 });
   await page.waitForTimeout(2500);
+
+  // ---- P1-A regression: requests BEFORE the reader clicks "Allow remote content" ----
+  const beforeClick = requests.slice();
+  const beforeRemote = beforeClick.filter(isRemoteRequest);
+  const beforeSender = beforeClick.filter(isSenderRequest);
+  const beforeProxy = beforeClick.filter(isProxyRequest);
+  console.log("requests before 'Allow remote content': " + beforeClick.length + " (remote " + beforeRemote.length + ", sender " + beforeSender.length + ", proxy " + beforeProxy.length + ")");
+  check(beforeRemote.length === 0, "zero requests to the remote host before consent (" + beforeRemote.join(", ") + ")");
+  check(beforeSender.length === 0, "zero requests to the sender-chosen path before consent (" + beforeSender.join(", ") + ")");
+  check(beforeProxy.length === 0, "no proxied remote fetch before consent (got " + beforeProxy.length + ")");
 
   const frameHandle = await page.$('iframe[title="message"]');
   const sandbox = await frameHandle.getAttribute("sandbox");
@@ -140,6 +185,48 @@ async function main() {
   check(height > 150, "frame auto-sized above 150px (got: " + height + ")");
   check(cidSrc !== null && cidSrc.indexOf("blob:") === 0, "cid image rendered as a parent-fetched blob (got: " + cidSrc + ")");
   check(opacity === "SecurityError", "frame origin is opaque (contentWindow.document threw " + opacity + ")");
+
+  // ---- P1-A regression: click "Allow remote content", then exactly the proxied fetch appears ----
+  const allowButton = page.getByRole("button", { name: "Allow remote content" });
+  const hasAllow = (await allowButton.count()) > 0;
+  check(hasAllow, "'Allow remote content' button is present (message has remote content)");
+  if (hasAllow) {
+    await allowButton.click();
+    await page.waitForTimeout(2500);
+  }
+  const afterClick = requests.slice();
+  const afterRemote = afterClick.filter(isRemoteRequest);
+  const afterSender = afterClick.filter(isSenderRequest);
+  const afterProxy = afterClick.filter(isProxyRequest);
+  console.log("requests after 'Allow remote content': " + afterClick.length + " (remote " + afterRemote.length + ", sender " + afterSender.length + ", proxy " + afterProxy.length + ")");
+  check(afterRemote.length === 0, "still zero direct requests to the remote host after consent (" + afterRemote.join(", ") + ")");
+  check(afterSender.length === 0, "still zero requests to the sender-chosen path after consent (" + afterSender.join(", ") + ")");
+  check(afterProxy.length >= 1, "remote image fetched through the proxy after consent (got " + afterProxy.length + ")");
+
+  // ---- Composer path: replying quotes the original without loading its images ----
+  let replyClicked = false;
+  try {
+    const inlineReply = page.getByRole("button", { name: "Reply", exact: true });
+    if ((await inlineReply.count()) > 0) {
+      await inlineReply.click();
+    } else {
+      // Narrow viewport: the reply action overflowed into the "More actions" menu.
+      await page.getByRole("button", { name: "More actions" }).click();
+      await page.waitForTimeout(300);
+      await page.getByRole("menuitem", { name: "Reply" }).click();
+    }
+    replyClicked = true;
+  } catch (error) {
+    console.log("reply click skipped: " + error.message);
+  }
+  await page.waitForTimeout(2500);
+  const afterReply = requests.slice();
+  const replyRemote = afterReply.filter(isRemoteRequest);
+  const replySender = afterReply.filter(isSenderRequest);
+  console.log("requests after clicking Reply: " + afterReply.length + " (remote " + replyRemote.length + ", sender " + replySender.length + ")");
+  check(replyClicked, "reply action is reachable in the message view");
+  check(replyRemote.length === 0, "reply composer never requests the remote host (" + replyRemote.join(", ") + ")");
+  check(replySender.length === 0, "reply composer never requests the sender-chosen path (" + replySender.join(", ") + ")");
 
   const cspErrors = consoleMessages.filter((m) => /Content Security Policy|Refused to|violates the following/i.test(m.text));
   check(cspErrors.length === 0, "zero CSP console errors (got " + cspErrors.length + ")");

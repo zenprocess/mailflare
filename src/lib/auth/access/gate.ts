@@ -169,10 +169,21 @@ function askAnAdmin(request: Request): Response {
 	);
 }
 
+/** The trimmed name of a Cookie-header part: the text before the first "=", or the whole trimmed part. */
+function cookieName(part: string): string {
+	const index = part.indexOf("=");
+	return (index === -1 ? part : part.slice(0, index)).trim();
+}
+
+/** Whether a Cookie-header part is the session cookie: its trimmed name equals it, case-insensitively. */
+function isSessionCookie(part: string): boolean {
+	return cookieName(part).toLowerCase() === SESSION_COOKIE.toLowerCase();
+}
+
 function readCookie(request: Request, name: string): string | undefined {
 	for (const part of (request.headers.get("Cookie") ?? "").split(";")) {
 		const index = part.indexOf("=");
-		if (index === -1 || part.slice(0, index).trim() !== name) continue;
+		if (index === -1 || part.slice(0, index).trim().toLowerCase() !== name.toLowerCase()) continue;
 		const value = part.slice(index + 1).trim();
 		if (!value) return undefined;
 		try {
@@ -250,7 +261,7 @@ function withSessionCookie(request: Request, token: string): Request {
 	const kept = (request.headers.get("Cookie") ?? "")
 		.split(";")
 		.map((part) => part.trim())
-		.filter((part) => part && !part.startsWith(SESSION_COOKIE + "="));
+		.filter((part) => part && !isSessionCookie(part));
 	kept.push(SESSION_COOKIE + "=" + encodeURIComponent(token));
 	const headers = new Headers(request.headers);
 	headers.set("Cookie", kept.join("; "));
@@ -366,16 +377,22 @@ export async function applyAccessGate(request: Request, env: CloudflareEnv, opti
 	const bearer = bearerToken(request);
 	const bearerUser = await sessionUser(env, bearer);
 	if (bearerUser) {
-		if (sameEmail(bearerUser.email, email) && isUsable(bearerUser)) return { kind: "pass", request, userId: bearerUser.id };
+		if (sameEmail(bearerUser.email, email) && isUsable(bearerUser)) {
+			// The Bearer is the verified session; strip any cookie session so the app cannot disagree.
+			return { kind: "pass", request: stripSession(request), userId: bearerUser.id };
+		}
 		return {
 			kind: "response",
 			response: accessErrorResponse(request, 403, "access_identity_mismatch", "Signed in as someone else", "This session does not belong to your Cloudflare Access sign-in."),
 		};
 	}
 
-	const cookieUser = await sessionUser(env, readCookie(request, SESSION_COOKIE));
+	const cookieToken = readCookie(request, SESSION_COOKIE);
+	const cookieUser = await sessionUser(env, cookieToken);
 	if (cookieUser && sameEmail(cookieUser.email, email) && isUsable(cookieUser)) {
-		return { kind: "pass", request, userId: cookieUser.id };
+		// Exactly one verified session cookie reaches the app: drop every duplicate or case-variant
+		// ep_session (the gate reads the first, the app reads the last — this removes the ambiguity).
+		return { kind: "pass", request: withSessionCookie(request, cookieToken!), userId: cookieUser.id };
 	}
 
 	const matches = await findUsersByEmail(env, email);
@@ -406,13 +423,14 @@ export async function applyAccessGate(request: Request, env: CloudflareEnv, opti
 	return { kind: "pass", request: withSessionCookie(request, token), setCookie: sessionSetCookie(request, token), userId: user.id };
 }
 
-/** Drops a session cookie that belongs to another identity, so the app treats the request as signed out. */
+/** Drops every session cookie (any trimmed-name case variant), so the app treats the request as signed out. */
 function stripSession(request: Request): Request {
-	if (!readCookie(request, SESSION_COOKIE)) return request;
-	const kept = (request.headers.get("Cookie") ?? "")
+	const parts = (request.headers.get("Cookie") ?? "")
 		.split(";")
 		.map((part) => part.trim())
-		.filter((part) => part && !part.startsWith(SESSION_COOKIE + "="));
+		.filter(Boolean);
+	if (!parts.some(isSessionCookie)) return request;
+	const kept = parts.filter((part) => !isSessionCookie(part));
 	const headers = new Headers(request.headers);
 	if (kept.length) headers.set("Cookie", kept.join("; "));
 	else headers.delete("Cookie");

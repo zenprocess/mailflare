@@ -470,3 +470,40 @@ test("a foreign session cookie is stripped on requests that do not mint a sessio
 	assert.equal(nav.userId, "u-admin");
 	assert.equal((await getUserFromSession(env, sessionFrom(nav.setCookie))).id, "u-admin");
 });
+
+test("duplicate, spaced-name and case-variant session cookies are reduced to exactly one verified session", async (t) => {
+	const { env, gate } = await fixture(t);
+	const owner = sessionFrom((await gate(await req("/inbox", { email: "owner@one.test", html: true }))).setCookie);
+	const bob = sessionFrom((await gate(await req("/inbox", { email: "bob@one.test", html: true }))).setCookie);
+
+	// The gate reads the first ep_session and the app reads the last, so two session cookies let a
+	// foreign token reach the app. The rewrite must collapse every ep_session part (any trimmed-name
+	// case variant) into exactly one verified session, whichever order or spelling the attacker sends.
+	for (const cookie of [
+		"ep_session=" + bob + "; ep_session=" + owner,
+		"ep_session=" + owner + "; ep_session=" + bob,
+		"ep_session =" + bob,
+		"EP_SESSION=" + bob,
+		"ep_session=" + bob + "; ep_session =" + owner + "; EP_SESSION=" + bob + "; theme=dark",
+	]) {
+		const result = await gate(await req("/inbox", { email: "owner@one.test", html: true, headers: { Cookie: cookie } }));
+		assert.equal(result.kind, "pass", cookie);
+		assert.equal(result.userId, "u-admin", cookie);
+		const outCookie = result.request.headers.get("Cookie") ?? "";
+		const sessionParts = outCookie.split(";").map((part) => part.trim()).filter((part) => /^ep_session=/i.test(part));
+		assert.equal(sessionParts.length, 1, cookie + " -> " + outCookie);
+		assert.doesNotMatch(outCookie, new RegExp(bob), cookie);
+		const token = decodeURIComponent(sessionParts[0].slice(sessionParts[0].indexOf("=") + 1));
+		assert.equal((await getUserFromSession(env, token)).id, "u-admin", cookie);
+	}
+
+	// Subresource requests strip the foreign/spaced/case cookie without minting a session.
+	const rsc = await gate(await req("/inbox?_rsc=abc", { email: "owner@one.test", headers: { Cookie: "ep_session =" + bob + "; EP_SESSION=" + bob + "; theme=dark", RSC: "1", Accept: "*/*" } }));
+	assert.equal(rsc.kind, "pass");
+	assert.equal(rsc.userId, "u-admin");
+	assert.equal(rsc.setCookie, undefined);
+	const rscCookie = rsc.request.headers.get("Cookie") ?? "";
+	assert.doesNotMatch(rscCookie, new RegExp(bob));
+	assert.doesNotMatch(rscCookie, /ep_session/i);
+	assert.match(rscCookie, /theme=dark/);
+});

@@ -165,6 +165,8 @@ Add your Cloudflare credentials to `.dev.vars`, then open [localhost:3000](http:
 - `npm run deploy`: build and deploy
 - `npm run lint`: lint and type check
 
+> **Build with `NODE_ENV` unset or `production`.** `process.env.NODE_ENV` is a build-time constant that decides whether `'unsafe-inline'` and `'unsafe-eval'` are folded into the script-src of the static CSP fallback (`src/lib/security/headers.ts`). A production build (`NODE_ENV` unset or `production`) folds both to the empty string; only then does the deployed Worker serve HTML documents with the strict nonce CSP and no `'unsafe-inline'`. Do not build with `NODE_ENV=development` for a deployment.
+
 A schema change needs a migration for each database type. See [Databases](docs/databases.md#migrations).
 
 ## Documentation

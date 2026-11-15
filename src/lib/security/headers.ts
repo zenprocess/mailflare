@@ -3,10 +3,11 @@ import { SPLASH_GUARD_SCRIPT_SHA256 } from "@/lib/security/splash-script";
 
 // Dev tooling (HMR, source maps) evaluates strings; production never needs to.
 const scriptEval = process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'";
-// Inline scripts are allowed only in development, where the Worker's nonce stamping does not run.
-// Production HTML documents are always stamped with a per-request nonce, so the static fallback
-// (non-HTML responses and the replace-comparison in shouldApplyNonceCsp) carries no 'unsafe-inline'.
-// This is what keeps 'unsafe-inline' out of the production bundle's script-src entirely.
+// Inline scripts are allowed only in development. The Worker's nonce stamping (worker.ts) runs for
+// every GET/HEAD regardless of NODE_ENV, so a document request is always served with the nonce
+// policy, which drops 'unsafe-inline'; the static fallback below (non-HTML responses and the
+// replace-comparison in shouldApplyNonceCsp) is what keeps 'unsafe-inline' out of the production
+// bundle's script-src entirely. Build with NODE_ENV unset or 'production'.
 const scriptInline = process.env.NODE_ENV === "production" ? "" : " 'unsafe-inline'";
 
 /**
@@ -32,7 +33,12 @@ export function buildCsp(nonce?: string): string {
 		"default-src 'self'",
 		`script-src ${scriptSrc}`,
 		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data: blob: https:",
+		// No https: here: remote content is only ever shown after the reader consents, fetched by the
+		// parent as a Blob and handed to the sandboxed frame. A remote image must never load from the
+		// top document, so even a future DOM-adoption bug cannot fetch one. Avatars and contact photos
+		// are served from the app's own origin (/api/…); the one UI favicon that loaded https directly
+		// (the Domains list) was removed to stay under this policy.
+		"img-src 'self' data: blob:",
 		"font-src 'self' data:",
 		// 'self' also covers the same-origin wss: upgrade to the realtime endpoint (CSP3).
 		"connect-src 'self' https://challenges.cloudflare.com",

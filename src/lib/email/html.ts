@@ -192,9 +192,13 @@ function restoreDocument(template: HTMLTemplateElement, doc: MailDocument, full:
 	const body = root.querySelector(doc.bodyTag)!;
 	const headNodes = Array.from(root.querySelectorAll("style, base"));
 	if (!full) return body.innerHTML;
-	const html = document.createElement("html");
-	const head = document.createElement("head");
-	const bodyElement = document.createElement("body");
+	// Build the document in an inert document, never the live one: adopting a mail <img> into the
+	// live document would start loading its src (a remote image or a sender-chosen same-origin path)
+	// before the reader consents. An inert document has no browsing context, so nothing can fetch.
+	const inert = document.implementation.createHTMLDocument("");
+	const html = inert.createElement("html");
+	const head = inert.createElement("head");
+	const bodyElement = inert.createElement("body");
 	for (const attribute of root.attributes) html.setAttribute(attribute.name, attribute.value);
 	for (const attribute of body.attributes) bodyElement.setAttribute(attribute.name, attribute.value);
 	for (const node of headNodes) head.appendChild(node);
@@ -209,8 +213,11 @@ function outgoingFragment(template: HTMLTemplateElement, doc: MailDocument): str
 	const root = template.content.querySelector(doc.rootTag)!;
 	const body = root.querySelector(doc.bodyTag)!;
 	if (!doc.needsWrapper) return body.innerHTML;
+	// Wrapper divs are built in an inert document for the same reason as restoreDocument: adopting a
+	// mail <img> into a live-document div would start loading its src while quoting/forwarding.
+	const inert = document.implementation.createHTMLDocument("");
 	const convert = (element: Element, className: string) => {
-		const replacement = document.createElement("div");
+		const replacement = inert.createElement("div");
 		for (const attribute of element.attributes) replacement.setAttribute(attribute.name, attribute.value);
 		replacement.classList.add(className);
 		for (const child of Array.from(element.childNodes)) replacement.appendChild(child);

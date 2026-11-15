@@ -7,11 +7,8 @@ import { collapseQuotedEmailHtml } from "@/app/(dashboard)/inbox/[messageId]/quo
 import { buildMailFrameDocument, MAIL_FRAME_MESSAGE_SOURCE, parseMailFrameMessage } from "@/lib/remote-images/frame";
 import {
 	attachmentPreviewUrl,
-	forcedImageMime,
-	FRAME_FETCH_CONCURRENCY,
+	fetchFrameImages,
 	MAX_FRAME_IMAGES,
-	MAX_IMAGE_BYTES,
-	MAX_TOTAL_IMAGE_BYTES,
 } from "./email-html-renderer-utils";
 
 const BLANK_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
@@ -123,27 +120,7 @@ export function EmailHtmlRenderer({ html, className, dense = false, preserveLead
 		if (!frame || !blobUrls.length) return;
 		void (async () => {
 			const urls = blobUrls.slice(0, MAX_FRAME_IMAGES);
-			const blobs: Array<{ index: number; blob: Blob }> = [];
-			let totalBytes = 0;
-			let cursor = 0;
-			const worker = async () => {
-				while (cursor < urls.length && totalBytes < MAX_TOTAL_IMAGE_BYTES) {
-					const index = cursor;
-					cursor += 1;
-					try {
-						const response = await fetch(urls[index]);
-						if (!response.ok) continue;
-						const type = forcedImageMime(response.headers.get("content-type"));
-						if (!type) continue;
-						const buffer = await response.arrayBuffer();
-						if (buffer.byteLength > MAX_IMAGE_BYTES) continue;
-						if (totalBytes + buffer.byteLength > MAX_TOTAL_IMAGE_BYTES) break;
-						totalBytes += buffer.byteLength;
-						blobs.push({ index, blob: new Blob([buffer], { type }) });
-					} catch { /* keep the placeholder */ }
-				}
-			};
-			await Promise.all(Array.from({ length: FRAME_FETCH_CONCURRENCY }, worker));
+			const blobs = await fetchFrameImages(urls, (url) => fetch(url));
 			if (blobs.length) frame.contentWindow?.postMessage({ source: MAIL_FRAME_MESSAGE_SOURCE, type: "blobs", blobs }, "*");
 		})();
 	};
