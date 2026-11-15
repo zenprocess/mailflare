@@ -38,6 +38,8 @@ import { runJmapChangeRetention } from "./src/lib/jmap/changes";
 import { runFollowUpReminders } from "./src/lib/follow-ups/service";
 import { runCalendarReminders } from "./src/lib/calendar/reminders";
 import { applyAccessGate, withAccessSessionCookie } from "./src/lib/auth/access/gate";
+import { buildCsp } from "./src/lib/security/headers";
+import { generateCspNonce } from "./src/lib/security/nonce";
 export { RealtimeHub } from "./src/lib/realtime/hub";
 
 export default {
@@ -72,8 +74,25 @@ export default {
 			return hub.fetch(hubRequest);
 		}
 
-		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(request, env, ctx));
-		return withAccessSessionCookie(withD1BookmarkCookie(request, response, d1Session?.session), accessCookie);
+		// Nonce-based CSP for document responses. Next reads the nonce from the request's CSP header and
+		// stamps its inline bootstrap scripts with it; the root layout reads `x-mf-csp-nonce` for its own two.
+		const isDocument = request.method === "GET" || request.method === "HEAD";
+		const nonce = isDocument ? generateCspNonce() : null;
+		const csp = nonce ? buildCsp(nonce) : null;
+		const renderRequest = csp ? (() => {
+			const next = new Request(request);
+			next.headers.set("x-mf-csp-nonce", nonce!);
+			next.headers.set("content-security-policy", csp);
+			return next;
+		})() : request;
+
+		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(renderRequest, env, ctx));
+		const withCsp = csp ? (() => {
+			const copy = new Response(response.body, response);
+			copy.headers.set("Content-Security-Policy", csp);
+			return copy;
+		})() : response;
+		return withAccessSessionCookie(withD1BookmarkCookie(request, withCsp, d1Session?.session), accessCookie);
 	},
 
 	async email(message: ForwardableEmailMessage, rawEnv: CloudflareEnv, ctx: ExecutionContext) {

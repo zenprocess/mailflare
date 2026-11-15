@@ -26,7 +26,6 @@ interface CloudflareEnv {
 	>;
 	ASSETS: Fetcher;
 	IMAGES: ImagesBinding;
-	WORKER_SELF_REFERENCE: Fetcher;
 	REALTIME: DurableObjectNamespace<
 		import("./src/lib/realtime/hub").RealtimeHub
 	>;
@@ -92,6 +91,8 @@ interface CloudflareEnv {
 	MAILFLARE_RUNTIME?: "node";
 	/** Shared secret the Cloudflare email relay signs inbound webhooks with (self-hosted only). */
 	INBOUND_WEBHOOK_SECRET?: string;
+	/** HMAC secret for signed remote-image proxy URLs (the sandboxed reader has no session cookie). */
+	REMOTE_IMAGES_HMAC_SECRET?: string;
 	/** "1" refuses relays that do not sign the header map with a timestamp (relay Worker v2). */
 	INBOUND_REQUIRE_SIGNED_HEADERS?: string;
 	/** Cloudflare account id, needed for the Email Sending REST API off Workers. */

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
 import { LanguageProvider } from "@/components/language-provider";
@@ -51,11 +52,20 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
 	const locale = await getRequestLocale();
 	const messages = locale === DEFAULT_LOCALE ? undefined : await loadServerMessages(locale);
 	const branding = await getHomeBranding();
+	// The Workers runtime sets this per request (see worker.ts); stamp the two inline bootstrap
+	// scripts so a nonce-based script-src (no 'unsafe-inline') still runs them. Outside a request
+	// scope (static render, tests) headers() throws, and the static CSP with unsafe-inline applies.
+	let nonce: string | undefined;
+	try {
+		nonce = (await headers()).get("x-mf-csp-nonce") ?? undefined;
+	} catch {
+		nonce = undefined;
+	}
 	return (
 		<html lang={locale} dir={getDirection(locale)} data-remote-image-proxy="enabled" suppressHydrationWarning>
 			<head>
-				<script dangerouslySetInnerHTML={{ __html: sidebarBootstrapScript }} />
-				<script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
+				<script nonce={nonce} dangerouslySetInnerHTML={{ __html: sidebarBootstrapScript }} />
+				<script nonce={nonce} dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
 				<link rel="icon" href="/api/branding/icon"></link>
 			</head>
 			<body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>

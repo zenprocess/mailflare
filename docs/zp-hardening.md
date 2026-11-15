@@ -39,3 +39,9 @@ This is not a drop-in change. A frame without `allow-same-origin` has an opaque 
 - quote-collapse, fragment navigation and dark-mode inversion have to move into static CSS.
 
 It needs browser testing, so it is tracked as a follow-up PR. Until then, the DOMPurify bump is the mitigation.
+
+## Open item: off-bucket backups (documented, not built)
+
+The daily 02:00 UTC backup (`src/lib/backups/runner.ts`, `worker.ts` scheduled handler) writes a SQL dump into **the same R2 bucket** (`mailflare-raw`) that holds the raw MIME, attachments and Drive files. Retention is optional (`runner.ts:58-72`). There is no copy outside the Cloudflare account, and the dumps contain the plaintext columns `totp_secret`, `resend_api_key`, `aws_config`, `resend_webhook_secret` and webhook secrets (review §5).
+
+Review condition 8.8 asks for an off-bucket (or encrypted) copy plus retention. This is **documented, not built**: before the pilot carries real mail, the operator must arrange either an outbound encrypted export (e.g. a cron that streams the JSON backup to an encrypted destination outside Cloudflare) or accept the single-account blast radius for the pilot. Set the backup retention explicitly (the current default keeps dumps indefinitely).
