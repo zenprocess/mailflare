@@ -38,6 +38,8 @@ export type AccessEnv = {
 	ACCESS_AUTO_PROVISION?: string;
 	ACCESS_ALLOW_PASSWORD_LOGIN?: string;
 	ACCESS_EMAIL_MAP?: string;
+	/** "off" disables the Access gate entirely; any other value (or absent) leaves it fail-closed when unconfigured. */
+	MAILFLARE_ACCESS_MODE?: string;
 };
 
 export type AccessConfig = {
@@ -131,7 +133,7 @@ function escapeHtml(value: string): string {
 	return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
 }
 
-export function accessErrorResponse(request: Request, status: 401 | 403 | 503, code: string, title: string, detail: string): Response {
+export function accessErrorResponse(request: Request, status: 400 | 401 | 403 | 503, code: string, title: string, detail: string): Response {
 	const headers = { "Cache-Control": "no-store", "X-Mailflare-Access": code };
 	if (!wantsHtml(request)) {
 		return Response.json({ error: title, code, detail }, { status, headers });
@@ -260,10 +262,56 @@ function sessionSetCookie(request: Request, token: string): string {
 	return SESSION_COOKIE + "=" + encodeURIComponent(token) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + 60 * 60 * 24 * 30 + secure;
 }
 
-export async function applyAccessGate(request: Request, env: CloudflareEnv, options: AccessGateOptions = {}): Promise<AccessGateResult> {
-	const config = readAccessConfig(env as unknown as AccessEnv);
-	if (config === null) return { kind: "off" };
+/**
+ * Normalises a request pathname for gate matching the way the framework routes it: percent-decodes
+ * and collapses repeated slashes. Encoded separators and dot segments are rejected (null) because the
+ * router resolves them to paths the gate must not miss (a %-encoded /register would otherwise reach
+ * first-run registration without matching SETUP_PATHS).
+ */
+export function normalizeGatePath(pathname: string): string | null {
+	// Reject encoded slash, backslash and dot before any decoding.
+	if (/%(?:2f|5c|2e)/i.test(pathname)) return null;
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(pathname);
+	} catch {
+		return null;
+	}
+	if (decoded.includes("\\")) return null;
+	const segments = decoded.split("/");
+	for (const segment of segments) {
+		if (segment === "." || segment === "..") return null;
+	}
+	return decoded.replace(/\/{2,}/g, "/") || "/";
+}
+
+/** Whether this request should get a freshly minted session when none exists yet (a navigation or an API call). */
+function needsSession(request: Request): boolean {
+	if (wantsHtml(request)) return true;
 	const { pathname } = new URL(request.url);
+	return pathname.startsWith("/api/") || pathname.startsWith("/jmap") || pathname.startsWith("/.well-known/jmap");
+}
+
+export async function applyAccessGate(request: Request, env: CloudflareEnv, options: AccessGateOptions = {}): Promise<AccessGateResult> {
+	const accessEnv = env as unknown as AccessEnv;
+	const config = readAccessConfig(accessEnv);
+	const pathname = normalizeGatePath(new URL(request.url).pathname);
+	if (pathname === null) {
+		return {
+			kind: "response",
+			response: accessErrorResponse(request, 400, "invalid_path", "Bad request path", "The request path contains encoded slashes or dot segments."),
+		};
+	}
+	if (config === null) {
+		// Access mode is opt-out, not opt-in: an unconfigured server must not fall back to upstream's
+		// open first-run registration. Only MAILFLARE_ACCESS_MODE=off disables the gate explicitly.
+		if ((accessEnv.MAILFLARE_ACCESS_MODE ?? "").trim().toLowerCase() === "off") return { kind: "off" };
+		if (matchesAny(pathname, BUILTIN_BYPASS_PATHS)) return { kind: "pass", request };
+		return {
+			kind: "response",
+			response: accessErrorResponse(request, 503, "access_not_configured", "Access not configured", "This server is not configured for Cloudflare Access sign-in. Set ACCESS_TEAM_DOMAIN and ACCESS_AUD, or MAILFLARE_ACCESS_MODE=off to run without Access."),
+		};
+	}
 	if (config !== "misconfigured" && matchesAny(pathname, config.bypassPaths)) return { kind: "pass", request };
 	if (matchesAny(pathname, BUILTIN_BYPASS_PATHS)) return { kind: "pass", request };
 	if (config === "misconfigured") {
@@ -330,6 +378,12 @@ export async function applyAccessGate(request: Request, env: CloudflareEnv, opti
 			response: accessErrorResponse(request, 403, "account_disabled", "Account disabled", "Your Mailflare account is disabled. Ask an administrator."),
 		};
 	}
+
+	// Only a navigation or an API call needs a fresh session. Subresource requests (static assets,
+	// avatars, the opaque mail frame) would otherwise mint a 30-day session each — and a Lax
+	// Set-Cookie is refused for cross-site subresources anyway. Pass them through with the verified
+	// identity, without minting.
+	if (!needsSession(request)) return { kind: "pass", request, userId: user.id };
 
 	const token = await createSession(env, user.id);
 	await recordAuthActivity(env, { action: "auth.login", userId: user.id, request });

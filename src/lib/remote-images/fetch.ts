@@ -172,14 +172,56 @@ async function readLimitedBody(response: Response, maxBytes: number): Promise<Ui
 	return body;
 }
 
+/** Expands an IPv6 address to eight 16-bit groups, or null when malformed. */
+function expandIpv6(value: string): number[] | null {
+	let text = value.toLowerCase();
+	// Rewrite a trailing dotted-quad IPv4 (::ffff:192.0.2.1) as two hex groups.
+	const dotted = /:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+	if (dotted) {
+		const octets = dotted[1].split(".").map(Number);
+		if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+		const g1 = (octets[0] * 256 + octets[1]).toString(16);
+		const g2 = (octets[2] * 256 + octets[3]).toString(16);
+		text = text.slice(0, dotted.index + 1) + g1 + ":" + g2;
+	}
+	const halves = text.split("::");
+	if (halves.length > 2) return null;
+	const parse = (s: string): number[] | null => {
+		if (s === "") return [];
+		const groups = s.split(":").map((part) => parseInt(part, 16));
+		return groups.some((g) => !Number.isInteger(g) || g < 0 || g > 0xffff) ? null : groups;
+	};
+	const head = parse(halves[0]);
+	const tail = halves.length === 2 ? parse(halves[1]) : [];
+	if (head === null || tail === null) return null;
+	if (halves.length === 1) return head.length === 8 ? head : null;
+	if (head.length + tail.length > 8) return null;
+	return [...head, ...new Array<number>(8 - head.length - tail.length).fill(0), ...tail];
+}
+
+function ipv4FromGroups(high: number, low: number): string {
+	return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+}
+
 export function isPublicAddress(address: string): boolean {
 	const value = address.trim().toLowerCase();
 	if (!value.includes(":")) return isPublicIpv4(value);
-	const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
-	if (mapped) return isPublicIpv4(mapped[1]);
-	if (value === "::" || value === "::1") return false;
-	// Unique local (fc00::/7), link-local (fe80::/10) and multicast (ff00::/8).
-	return !/^(f[cd]|fe[89ab]|ff)/.test(value);
+	const groups = expandIpv6(value);
+	if (groups === null) return false;
+	if (groups.every((g) => g === 0)) return false; // :: (unspecified)
+	if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false; // ::1 (loopback)
+	// IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::/96) embed an IPv4 in the last 32 bits.
+	const mapped = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff;
+	const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0;
+	if (mapped || nat64) return isPublicIpv4(ipv4FromGroups(groups[6], groups[7]));
+	if (groups[0] === 0x2002) return isPublicIpv4(ipv4FromGroups(groups[1], groups[2])); // 6to4 2002::/16
+	if (groups[0] === 0x0100) return false; // discard-only 100::/64 (RFC 6666)
+	if (groups[0] === 0x2001 && groups[1] === 0x0db8) return false; // documentation 2001:db8::/32 (RFC 3849)
+	const first = groups[0];
+	if ((first & 0xfe00) === 0xfc00) return false; // unique local fc00::/7
+	if ((first & 0xffc0) === 0xfe80) return false; // link-local fe80::/10
+	if ((first & 0xff00) === 0xff00) return false; // multicast ff00::/8
+	return true;
 }
 
 async function defaultResolveHost(hostname: string): Promise<string[]> {

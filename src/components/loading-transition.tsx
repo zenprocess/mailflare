@@ -7,6 +7,7 @@ import { PageLoadingContext } from "@/components/page-loading";
 import { RouteLoadingBar } from "@/components/route-loading-bar";
 import { RouteSkeleton } from "@/components/route-skeleton";
 import type { LoadingTransitionProps } from "./loading-transition-types";
+import { SPLASH_ENTRY_PATHS as ENTRY_PATHS, SPLASH_GUARD_SCRIPT } from "@/lib/security/splash-script";
 
 const MINIMUM_LOADING_TIME = 600;
 const COMPLETION_TIME = 220;
@@ -16,7 +17,6 @@ let hasShownInitialLoadingTransition = false;
 
 // The splash is for entering the app: the home page, sign-in, a typed URL, a bookmark or another site. A full page load
 // whose referrer is another page of this app (a "View on calendar" link in an email) is not an entry.
-const ENTRY_PATHS = ["/", "/login", "/setup"];
 
 function arrivedFromInsideApp(): boolean {
 	try {
@@ -31,8 +31,7 @@ function splashAlreadySeen(): boolean {
 }
 
 // Runs while the server HTML is parsed, before first paint and before hydration, so an in-app full page load never
-// flashes the splash.
-const SPLASH_GUARD_SCRIPT = `try{var r=document.referrer;if(r){var u=new URL(r);if(u.origin===location.origin&&${JSON.stringify(ENTRY_PATHS)}.indexOf(u.pathname)<0)document.documentElement.setAttribute("data-splash-seen","")}}catch(e){}`;
+// flashes the splash. SPLASH_GUARD_SCRIPT lives in src/lib/security/splash-script.ts so buildCsp can allow it by hash.
 const SPLASH_GUARD_STYLE = "html[data-splash-seen] .splash-overlay{display:none!important}";
 
 function rememberSplashSeen() {

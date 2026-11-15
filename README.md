@@ -124,6 +124,12 @@ node scripts/bundle-worker.mjs     # dist/mailflare-worker.mjs (one ESM file) + 
 - Turnstile site key (build time `NEXT_PUBLIC_TURNSTILE_SITE_KEY`) and secret key (`TURNSTILE_SECRET_KEY`).
 - `MAILFLARE_SETUP_DOMAINS` (the pilot mail domain) and the pilot subdomain itself.
 
+**Access and remote-image options** (names only):
+
+- `MAILFLARE_ACCESS_MODE` — set it to `off` only to run without Cloudflare Access. The default is **fail-closed**: with `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` unset and no `MAILFLARE_ACCESS_MODE=off`, every request answers 503 "Access not configured".
+- `REMOTE_IMAGES_HMAC_SECRET` — optional, ≥32 random bytes; only needed if the signed-URL path of `/api/remote-images` is used. The sandboxed reader no longer requires it (the parent fetches proxied images and posts Blobs).
+- `ACCESS_AUTO_PROVISION` and `ACCESS_ALLOW_PASSWORD_LOGIN` **must stay unset** for the pilot.
+
 The D1 schema is applied from `/api/setup/prepare` — do not run remote migrations. The worker name must stay `mailflare` (routing rules hard-code it). See `docs/zp-hardening.md` and `docs/zp-access.md` for the full pilot checklist.
 
 ### Self-host with Docker

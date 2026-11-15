@@ -14,7 +14,7 @@ await build({
 	stdin: {
 		contents: [
 			'export { verifyAccessJwt, clearAccessJwksCache, JWKS_TTL_MS, JWKS_MIN_REFRESH_MS } from "./src/lib/auth/access/jwt.ts";',
-			'export { applyAccessGate, readAccessConfig, pathMatches, withAccessSessionCookie } from "./src/lib/auth/access/gate.ts";',
+			'export { applyAccessGate, readAccessConfig, pathMatches, normalizeGatePath, withAccessSessionCookie } from "./src/lib/auth/access/gate.ts";',
 			'export { getUserFromSession } from "./src/lib/auth/session.ts";',
 			'export { SqliteDatabase } from "./server/runtime/sqlite-database.ts";',
 			'export { applyMigrations } from "./server/runtime/migrate.ts";',
@@ -41,6 +41,7 @@ const {
 	applyAccessGate,
 	readAccessConfig,
 	pathMatches,
+	normalizeGatePath,
 	withAccessSessionCookie,
 	getUserFromSession,
 	SqliteDatabase,
@@ -216,20 +217,35 @@ function sessionFrom(setCookie) {
 	return decodeURIComponent(/ep_session=([^;]+)/.exec(setCookie)[1]);
 }
 
-test("Access mode is off unless both vars are set; half-configured fails closed", async (t) => {
+test("Access mode fails closed when unconfigured, unless MAILFLARE_ACCESS_MODE=off", async (t) => {
 	assert.equal(readAccessConfig({}), null);
 	assert.equal(readAccessConfig({ ACCESS_TEAM_DOMAIN: TEAM }), "misconfigured");
+
+	// Both vars unset, no opt-out: every request is 503 "Access not configured".
+	const unconfigured = await applyAccessGate(await req("/inbox"), { DB: null });
+	assert.equal(unconfigured.kind, "response");
+	assert.equal(unconfigured.response.status, 503);
+	assert.match(unconfigured.response.headers.get("X-Mailflare-Access"), /access_not_configured/);
+
+	// The built-in mail-ingest webhooks stay reachable even when Access is unconfigured.
+	const inbound = await applyAccessGate(await req("/api/inbound/ses"), { DB: null });
+	assert.equal(inbound.kind, "pass");
+
+	// Half-configured (one var set) still fails closed with 503.
 	const { gate } = await fixture(t, { ACCESS_AUD: "" });
 	const res = await gate(await req("/inbox"));
 	assert.equal(res.kind, "response");
 	assert.equal(res.response.status, 503);
-	const off = await applyAccessGate(await req("/inbox"), { DB: null });
+	assert.equal(res.response.headers.get("X-Mailflare-Access"), "access_misconfigured");
+
+	// Explicit MAILFLARE_ACCESS_MODE=off restores upstream open behaviour.
+	const off = await applyAccessGate(await req("/inbox"), { DB: null, MAILFLARE_ACCESS_MODE: "off" });
 	assert.equal(off.kind, "off");
 });
 
 test("valid assertion for an existing user (any case) creates a normal session, then reuses it", async (t) => {
 	const { env, gate } = await fixture(t);
-	const first = await gate(await req("/inbox", { email: "OWNER@one.TEST" }));
+	const first = await gate(await req("/inbox", { email: "OWNER@one.TEST", html: true }));
 	assert.equal(first.kind, "pass");
 	assert.equal(first.userId, "u-admin");
 	assert.match(first.setCookie, /^ep_session=.+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure$/);
@@ -285,9 +301,9 @@ test("ACCESS_AUTO_PROVISION=true creates a passwordless user for an unknown iden
 
 test("a session or Bearer token of another user does not survive a different Access identity", async (t) => {
 	const { env, gate } = await fixture(t);
-	const bob = sessionFrom((await gate(await req("/inbox", { email: "bob@one.test" }))).setCookie);
+	const bob = sessionFrom((await gate(await req("/inbox", { email: "bob@one.test", html: true }))).setCookie);
 	// Cookie for Bob, Access says Owner: a fresh Owner session replaces it.
-	const swapped = await gate(await req("/inbox", { email: "owner@one.test", headers: { Cookie: "ep_session=" + bob + "; theme=dark" } }));
+	const swapped = await gate(await req("/inbox", { email: "owner@one.test", html: true, headers: { Cookie: "ep_session=" + bob + "; theme=dark" } }));
 	assert.equal(swapped.kind, "pass");
 	assert.equal(swapped.userId, "u-admin");
 	assert.equal((await getUserFromSession(env, sessionFrom(swapped.setCookie))).id, "u-admin");
@@ -374,4 +390,52 @@ test("password sign-in is disabled in Access mode unless ACCESS_ALLOW_PASSWORD_L
 	assert.equal((await gate(await req("/api/auth/step-up/options", { email: "owner@one.test", method: "POST" }))).kind, "pass");
 	const { gate: allowed } = await fixture(t, { ACCESS_ALLOW_PASSWORD_LOGIN: "true" });
 	assert.equal((await allowed(await req("/api/auth/login", { email: "owner@one.test", method: "POST" }))).kind, "pass");
+});
+
+test("the gate normalises the path like the router and rejects encoded separators / dot segments", async (t) => {
+	assert.equal(normalizeGatePath("/api/auth/%72egister"), "/api/auth/register");
+	assert.equal(normalizeGatePath("//api/auth/register"), "/api/auth/register");
+	assert.equal(normalizeGatePath("/api/%73etup/prepare"), "/api/setup/prepare");
+	assert.equal(normalizeGatePath("/api/auth/%2fregister"), null);
+	assert.equal(normalizeGatePath("/api/auth/%5cregister"), null);
+	assert.equal(normalizeGatePath("/api/%2e%2e/setup"), null);
+	assert.equal(normalizeGatePath("/api/../setup"), null);
+	assert.equal(normalizeGatePath("/api/./setup"), null);
+
+	// Bypass strings reach the gated route through the normalised path, not the raw one.
+	const { gate } = await fixture(t, { ACCESS_SETUP_EMAILS: "owner@one.test" });
+	for (const path of ["/api/auth/%72egister", "//api/auth/register", "/api/%73etup/prepare"]) {
+		assert.equal((await gate(await req(path))).response.status, 401, path + " needs an assertion");
+		assert.equal((await gate(await req(path, { email: "bob@one.test" }))).response.status, 403, path + " non-setup email");
+	}
+	// Encoded separators are rejected outright with 400. (The URL parser resolves literal and
+	// %2e%2e dot segments before the gate ever sees them, so those are covered by the direct
+	// normalizeGatePath assertions above.)
+	for (const path of ["/api/auth/%2fregister", "/api/auth/%5cregister"]) {
+		assert.equal((await gate(await req(path, { email: "owner@one.test" }))).response.status, 400, path);
+	}
+});
+
+test("a session is minted only for navigations and API calls, not subresources", async (t) => {
+	const { database, gate } = await fixture(t);
+	const count = () => database.db.prepare("SELECT count(*) AS n FROM sessions").get().n;
+
+	// A navigation (Accept: text/html) mints a session.
+	const nav = await gate(await req("/inbox", { email: "owner@one.test", html: true }));
+	assert.equal(nav.kind, "pass");
+	assert.ok(nav.setCookie);
+	assert.equal(count(), 1);
+
+	// An API call mints a session too.
+	const api = await gate(await req("/api/messages", { email: "owner@one.test" }));
+	assert.equal(api.kind, "pass");
+	assert.ok(api.setCookie);
+	assert.equal(count(), 2);
+
+	// A subresource request (no html Accept, not /api) verifies the identity but mints nothing.
+	const sub = await gate(await req("/favicon.ico", { email: "owner@one.test" }));
+	assert.equal(sub.kind, "pass");
+	assert.equal(sub.setCookie, undefined);
+	assert.equal(sub.userId, "u-admin");
+	assert.equal(count(), 2);
 });

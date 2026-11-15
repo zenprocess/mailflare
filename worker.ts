@@ -38,7 +38,7 @@ import { runJmapChangeRetention } from "./src/lib/jmap/changes";
 import { runFollowUpReminders } from "./src/lib/follow-ups/service";
 import { runCalendarReminders } from "./src/lib/calendar/reminders";
 import { applyAccessGate, withAccessSessionCookie } from "./src/lib/auth/access/gate";
-import { buildCsp } from "./src/lib/security/headers";
+import { buildCsp, withNonceCsp } from "./src/lib/security/headers";
 import { generateCspNonce } from "./src/lib/security/nonce";
 export { RealtimeHub } from "./src/lib/realtime/hub";
 
@@ -87,11 +87,7 @@ export default {
 		})() : request;
 
 		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(renderRequest, env, ctx));
-		const withCsp = csp ? (() => {
-			const copy = new Response(response.body, response);
-			copy.headers.set("Content-Security-Policy", csp);
-			return copy;
-		})() : response;
+		const withCsp = csp ? withNonceCsp(response, csp) : response;
 		return withAccessSessionCookie(withD1BookmarkCookie(request, withCsp, d1Session?.session), accessCookie);
 	},
 
