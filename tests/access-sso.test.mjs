@@ -401,6 +401,11 @@ test("the gate normalises the path like the router and rejects encoded separator
 	assert.equal(normalizeGatePath("/api/%2e%2e/setup"), null);
 	assert.equal(normalizeGatePath("/api/../setup"), null);
 	assert.equal(normalizeGatePath("/api/./setup"), null);
+	// NUL and other control bytes are rejected with 400 (the router 404s them).
+	assert.equal(normalizeGatePath("/api/setup/status%00"), null);
+	assert.equal(normalizeGatePath("/api/setup/status\u0000"), null);
+	assert.equal(normalizeGatePath("/api/setup%1fstatus"), null);
+	assert.equal(normalizeGatePath("/api/setup/status%7f"), null);
 
 	// Bypass strings reach the gated route through the normalised path, not the raw one.
 	const { gate } = await fixture(t, { ACCESS_SETUP_EMAILS: "owner@one.test" });
@@ -411,7 +416,7 @@ test("the gate normalises the path like the router and rejects encoded separator
 	// Encoded separators are rejected outright with 400. (The URL parser resolves literal and
 	// %2e%2e dot segments before the gate ever sees them, so those are covered by the direct
 	// normalizeGatePath assertions above.)
-	for (const path of ["/api/auth/%2fregister", "/api/auth/%5cregister"]) {
+	for (const path of ["/api/auth/%2fregister", "/api/auth/%5cregister", "/api/setup/status%00"]) {
 		assert.equal((await gate(await req(path, { email: "owner@one.test" }))).response.status, 400, path);
 	}
 });
@@ -438,4 +443,30 @@ test("a session is minted only for navigations and API calls, not subresources",
 	assert.equal(sub.setCookie, undefined);
 	assert.equal(sub.userId, "u-admin");
 	assert.equal(count(), 2);
+});
+
+test("a foreign session cookie is stripped on requests that do not mint a session", async (t) => {
+	const { env, gate } = await fixture(t);
+	const bob = sessionFrom((await gate(await req("/inbox", { email: "bob@one.test", html: true }))).setCookie);
+	const bobCookie = "ep_session=" + bob;
+
+	// RSC subresource shape (Accept: */*, not /api) with Bob's cookie and Owner's Access identity.
+	const rsc = await gate(await req("/inbox?_rsc=abc", { email: "owner@one.test", headers: { Cookie: bobCookie + "; theme=dark", RSC: "1", Accept: "*/*" } }));
+	assert.equal(rsc.kind, "pass");
+	assert.equal(rsc.userId, "u-admin");
+	assert.equal(rsc.setCookie, undefined, "no session minted for a subresource");
+	assert.doesNotMatch(rsc.request.headers.get("Cookie") ?? "", new RegExp(bob));
+	assert.match(rsc.request.headers.get("Cookie") ?? "", /theme=dark/);
+
+	// Server-action shape (POST, Accept: text/x-component) also strips the foreign session.
+	const action = await gate(await req("/inbox", { email: "owner@one.test", method: "POST", headers: { Cookie: bobCookie, Accept: "text/x-component" } }));
+	assert.equal(action.kind, "pass");
+	assert.equal(action.userId, "u-admin");
+	assert.doesNotMatch(action.request.headers.get("Cookie") ?? "", new RegExp(bob));
+
+	// A navigation still mints a fresh Owner session and replaces the foreign cookie.
+	const nav = await gate(await req("/inbox", { email: "owner@one.test", html: true, headers: { Cookie: bobCookie } }));
+	assert.equal(nav.kind, "pass");
+	assert.equal(nav.userId, "u-admin");
+	assert.equal((await getUserFromSession(env, sessionFrom(nav.setCookie))).id, "u-admin");
 });

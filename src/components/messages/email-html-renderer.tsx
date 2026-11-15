@@ -5,10 +5,16 @@ import { useEffect, useRef, useState } from "react";
 import { prepareReaderEmailHtml } from "@/lib/remote-images/reader";
 import { collapseQuotedEmailHtml } from "@/app/(dashboard)/inbox/[messageId]/quote-collapse-utils";
 import { buildMailFrameDocument, MAIL_FRAME_MESSAGE_SOURCE, parseMailFrameMessage } from "@/lib/remote-images/frame";
+import {
+	attachmentPreviewUrl,
+	forcedImageMime,
+	FRAME_FETCH_CONCURRENCY,
+	MAX_FRAME_IMAGES,
+	MAX_IMAGE_BYTES,
+	MAX_TOTAL_IMAGE_BYTES,
+} from "./email-html-renderer-utils";
 
 const BLANK_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
-// cid: attachments arrive as the reader's preview URL (see resolveInlineAttachmentUrls).
-const ATTACHMENT_PREVIEW = /^\/api\/messages\/[^/]+\/attachments\/[^/?]+\?preview=1$/;
 // Remote images are rewritten by prepareReaderEmailHtml to this cookie-less-able proxy path.
 const REMOTE_PROXY_PATH = /\/api\/remote-images\?url=[^"'\s<>&]+/;
 
@@ -30,11 +36,15 @@ function collectBlobImages(html: string, remotePaths: string[]): { html: string;
 	template.innerHTML = html;
 	for (const img of template.content.querySelectorAll("img")) {
 		const src = img.getAttribute("src") ?? "";
-		if (!ATTACHMENT_PREVIEW.test(src) && !remote.has(src)) continue;
-		let index = urls.indexOf(src);
+		// Attachment previews are rebuilt from the validated ids, never fetched from the raw src,
+		// so a crafted src (with ".." segments) cannot make the reader's browser GET another path.
+		const attachmentUrl = attachmentPreviewUrl(src);
+		if (!attachmentUrl && !remote.has(src)) continue;
+		const fetchUrl = attachmentUrl ?? src;
+		let index = urls.indexOf(fetchUrl);
 		if (index === -1) {
 			index = urls.length;
-			urls.push(src);
+			urls.push(fetchUrl);
 		}
 		img.setAttribute("data-mf-blob", String(index));
 		img.setAttribute("src", BLANK_IMAGE);
@@ -104,19 +114,36 @@ export function EmailHtmlRenderer({ html, className, dense = false, preserveLead
 	}, []);
 
 	// Fetch cid attachments and remote images with the session cookie (the parent origin has it) and
-	// hand the bytes to the frame, which creates blob: URLs in its own (opaque) origin.
+	// hand the bytes to the frame, which creates blob: URLs in its own (opaque) origin. The fetch is
+	// bounded: at most MAX_FRAME_IMAGES images, MAX_IMAGE_BYTES per image and MAX_TOTAL_IMAGE_BYTES
+	// in total, with each Blob re-wrapped in an allow-listed image MIME so no non-image (SVG, HTML)
+	// type can ever reach the frame as active content.
 	const handleFrameLoad = () => {
 		const frame = frameRef.current;
 		if (!frame || !blobUrls.length) return;
 		void (async () => {
+			const urls = blobUrls.slice(0, MAX_FRAME_IMAGES);
 			const blobs: Array<{ index: number; blob: Blob }> = [];
-			for (let index = 0; index < blobUrls.length; index++) {
-				try {
-					const response = await fetch(blobUrls[index]);
-					if (!response.ok) continue;
-					blobs.push({ index, blob: await response.blob() });
-				} catch { /* keep the placeholder */ }
-			}
+			let totalBytes = 0;
+			let cursor = 0;
+			const worker = async () => {
+				while (cursor < urls.length && totalBytes < MAX_TOTAL_IMAGE_BYTES) {
+					const index = cursor;
+					cursor += 1;
+					try {
+						const response = await fetch(urls[index]);
+						if (!response.ok) continue;
+						const type = forcedImageMime(response.headers.get("content-type"));
+						if (!type) continue;
+						const buffer = await response.arrayBuffer();
+						if (buffer.byteLength > MAX_IMAGE_BYTES) continue;
+						if (totalBytes + buffer.byteLength > MAX_TOTAL_IMAGE_BYTES) break;
+						totalBytes += buffer.byteLength;
+						blobs.push({ index, blob: new Blob([buffer], { type }) });
+					} catch { /* keep the placeholder */ }
+				}
+			};
+			await Promise.all(Array.from({ length: FRAME_FETCH_CONCURRENCY }, worker));
 			if (blobs.length) frame.contentWindow?.postMessage({ source: MAIL_FRAME_MESSAGE_SOURCE, type: "blobs", blobs }, "*");
 		})();
 	};

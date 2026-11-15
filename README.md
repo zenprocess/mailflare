@@ -127,8 +127,15 @@ node scripts/bundle-worker.mjs     # dist/mailflare-worker.mjs (one ESM file) + 
 **Access and remote-image options** (names only):
 
 - `MAILFLARE_ACCESS_MODE` — set it to `off` only to run without Cloudflare Access. The default is **fail-closed**: with `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` unset and no `MAILFLARE_ACCESS_MODE=off`, every request answers 503 "Access not configured".
-- `REMOTE_IMAGES_HMAC_SECRET` — optional, ≥32 random bytes; only needed if the signed-URL path of `/api/remote-images` is used. The sandboxed reader no longer requires it (the parent fetches proxied images and posts Blobs).
+- `REMOTE_IMAGES_HMAC_SECRET` — **must stay unset**. The signed-URL path of `/api/remote-images` was removed; the parent fetches proxied images with the session cookie and posts Blobs to the sandboxed reader, so no signing secret exists.
 - `ACCESS_AUTO_PROVISION` and `ACCESS_ALLOW_PASSWORD_LOGIN` **must stay unset** for the pilot.
+
+**`keep_vars: true` and Access-only limits** (names only):
+
+- `wrangler.jsonc` sets `keep_vars: true`, so **every plain-text var must be resent in full on every deploy** — a var set once in the dashboard survives a deploy that omits it. After each deploy, read the Worker's vars back and assert `MAILFLARE_ACCESS_MODE` is **absent** and both `ACCESS_*` vars are present.
+- `MAILFLARE_ACCESS_MODE` must stay **absent** (never `off`), or the Access gate is disabled and the console falls back to open sign-in.
+- Behind Cloudflare Access, the **open-tracking pixel** (`/api/i/<token>.gif`), **shared-file links** (`/api/shared-files/[id]`), the **booking pages** and **JMAP / API-key clients** cannot work: Access blocks them at the edge, and the fail-closed gate exempts only `/api/inbound`. Leave read receipts and shared links off so users are not misled.
+- The Access gate exists **only in the Worker runtime** (`worker.ts`). The Node/Docker runtime (`server/`) has no gate, so a self-hosted build falls back to upstream's open first run — **do not run the Node runtime behind Access**.
 
 The D1 schema is applied from `/api/setup/prepare` — do not run remote migrations. The worker name must stay `mailflare` (routing rules hard-code it). See `docs/zp-hardening.md` and `docs/zp-access.md` for the full pilot checklist.
 

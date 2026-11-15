@@ -269,6 +269,24 @@ test("the IPv6 SSRF guard covers mapped, NAT64, 6to4, discard and documentation 
 	assert.equal(isPublicAddress("ff02::1"), false);
 });
 
+test("the IPv6 SSRF guard covers compatible, SIIT, local NAT64, site-local and Teredo ranges", () => {
+	// IPv4-compatible ::/96 (dotted and hex) with a private IPv4 is blocked; a public one passes.
+	assert.equal(isPublicAddress("::127.0.0.1"), false);
+	assert.equal(isPublicAddress("::7f00:1"), false);
+	assert.equal(isPublicAddress("::8.8.8.8"), true);
+	// SIIT ::ffff:0:0/96 with a private IPv4 is blocked.
+	assert.equal(isPublicAddress("::ffff:0:7f00:1"), false);
+	assert.equal(isPublicAddress("::ffff:0:127.0.0.1"), false);
+	// Local-use NAT64 64:ff9b:1::/48 (RFC 8215) with a private IPv4 is blocked.
+	assert.equal(isPublicAddress("64:ff9b:1::a00:1"), false);
+	assert.equal(isPublicAddress("64:ff9b:1::7f00:1"), false);
+	// Deprecated site-local fec0::/10 is blocked.
+	assert.equal(isPublicAddress("fec0::1"), false);
+	// Teredo 2001::/32 is blocked; other 2001::/32 addresses (public) pass.
+	assert.equal(isPublicAddress("2001:0:4136:e378:8000:63bf:3fff:fdd2"), false);
+	assert.equal(isPublicAddress("2001:4860:4860::8888"), true);
+});
+
 test("a public name that resolves to a private address is refused, including after a redirect", async () => {
 	for (const addresses of [["127.0.0.1"], ["10.0.0.5"], ["93.184.216.34", "169.254.169.254"], ["::1"], ["fd00::1"], ["::ffff:192.168.1.1"], []]) {
 		await assert.rejects(fetchRemoteImage("https://images.example/a.png", { resolveHost: async () => addresses, fetch: async () => new Response(png, { headers: { "content-type": "image/png" } }) }), (error) => error instanceof RemoteImageError);

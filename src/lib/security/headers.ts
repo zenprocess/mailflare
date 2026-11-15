@@ -3,6 +3,11 @@ import { SPLASH_GUARD_SCRIPT_SHA256 } from "@/lib/security/splash-script";
 
 // Dev tooling (HMR, source maps) evaluates strings; production never needs to.
 const scriptEval = process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'";
+// Inline scripts are allowed only in development, where the Worker's nonce stamping does not run.
+// Production HTML documents are always stamped with a per-request nonce, so the static fallback
+// (non-HTML responses and the replace-comparison in shouldApplyNonceCsp) carries no 'unsafe-inline'.
+// This is what keeps 'unsafe-inline' out of the production bundle's script-src entirely.
+const scriptInline = process.env.NODE_ENV === "production" ? "" : " 'unsafe-inline'";
 
 /**
  * The app Content-Security-Policy. When a per-request nonce is supplied (the Workers runtime, see
@@ -22,7 +27,7 @@ const scriptEval = process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'"
 export function buildCsp(nonce?: string): string {
 	const scriptSrc = nonce
 		? `'self' 'nonce-${nonce}' https://challenges.cloudflare.com '${MAIL_FRAME_MEASURE_SCRIPT_SHA256}' '${SPLASH_GUARD_SCRIPT_SHA256}'`
-		: `'self' 'unsafe-inline'${scriptEval} https://challenges.cloudflare.com`;
+		: `'self'${scriptInline}${scriptEval} https://challenges.cloudflare.com`;
 	return [
 		"default-src 'self'",
 		`script-src ${scriptSrc}`,
@@ -59,15 +64,19 @@ export function getSecurityHeaders(nonce?: string) {
 }
 
 /**
- * Whether the nonce CSP may be stamped on a response. Only HTML documents get it, and a response
- * that already carries its own Content-Security-Policy (attachments, Drive, shared files, avatars,
- * the remote-image proxy, JMAP downloads) is never overwritten — those sandbox policies are
- * deliberately stricter and must survive.
+ * Whether the nonce CSP may be stamped on a response. Only HTML documents get it. The static app
+ * policy that next.config.ts adds to every response (buildCsp() with no nonce) is NOT a route's
+ * own sandbox policy, so the Worker replaces it with the nonce policy. A response that carries any
+ * *other* Content-Security-Policy (attachments, Drive, shared files, avatars, the remote-image
+ * proxy, JMAP downloads) is never overwritten — those sandbox policies are deliberately stricter
+ * and must survive.
  */
 export function shouldApplyNonceCsp(response: Response): boolean {
-	if (response.headers.has("content-security-policy")) return false;
 	const contentType = response.headers.get("content-type") ?? "";
-	return contentType.split(";", 1)[0]!.trim().toLowerCase() === "text/html";
+	if (contentType.split(";", 1)[0]!.trim().toLowerCase() !== "text/html") return false;
+	const own = response.headers.get("content-security-policy");
+	if (own !== null && own !== buildCsp()) return false;
+	return true;
 }
 
 /** Stamps `csp` on `response` only when shouldApplyNonceCsp allows it; otherwise returns `response` unchanged. */

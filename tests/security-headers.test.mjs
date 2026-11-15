@@ -71,3 +71,27 @@ test("the nonce CSP applies only to HTML documents without their own CSP", () =>
 	const typeless = new Response("ok");
 	assert.equal(shouldApplyNonceCsp(typeless), false);
 });
+
+test("the static app policy (no nonce) is replaceable, so the nonce CSP reaches every document", () => {
+	const csp = buildCsp("n2");
+	// vinext adds the static next.config CSP to every App Router response. It must be replaced,
+	// not treated as a route's own sandbox policy.
+	const staticPolicy = new Response("<html></html>", { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": buildCsp() } });
+	assert.equal(shouldApplyNonceCsp(staticPolicy), true);
+	const replaced = withNonceCsp(staticPolicy, csp);
+	assert.equal(replaced.headers.get("Content-Security-Policy"), csp);
+	assert.ok(csp.includes("'nonce-n2'"), csp);
+	assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "script-src has no unsafe-inline: " + csp);
+
+	// Any other CSP (the sandbox policies on attachments, Drive, avatars, the proxy, JMAP downloads) survives.
+	for (const own of ["default-src 'none'; sandbox", "default-src 'none'; img-src 'self' data: blob:; sandbox", "script-src 'none'"]) {
+		const sandboxed = new Response("<html></html>", { headers: { "Content-Type": "text/html", "Content-Security-Policy": own } });
+		assert.equal(shouldApplyNonceCsp(sandboxed), false, own);
+		assert.equal(withNonceCsp(sandboxed, csp).headers.get("Content-Security-Policy"), own, own);
+	}
+
+	// Non-HTML responses keep their own CSP untouched even when it equals the static policy.
+	const json = new Response("{}", { headers: { "Content-Type": "application/json", "Content-Security-Policy": buildCsp() } });
+	assert.equal(shouldApplyNonceCsp(json), false);
+	assert.equal(withNonceCsp(json, csp), json);
+});

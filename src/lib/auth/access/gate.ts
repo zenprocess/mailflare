@@ -278,6 +278,9 @@ export function normalizeGatePath(pathname: string): string | null {
 		return null;
 	}
 	if (decoded.includes("\\")) return null;
+	// Reject NUL and the other C0 control bytes (and DEL). The router 404s them; they have no
+	// legitimate use in a path and are a classic header/splitting probe, so answer 400 instead.
+	if (/[\u0000-\u001f\u007f]/.test(decoded)) return null;
 	const segments = decoded.split("/");
 	for (const segment of segments) {
 		if (segment === "." || segment === "..") return null;
@@ -286,15 +289,27 @@ export function normalizeGatePath(pathname: string): string | null {
 }
 
 /** Whether this request should get a freshly minted session when none exists yet (a navigation or an API call). */
-function needsSession(request: Request): boolean {
+function needsSession(request: Request, pathname: string): boolean {
 	if (wantsHtml(request)) return true;
-	const { pathname } = new URL(request.url);
 	return pathname.startsWith("/api/") || pathname.startsWith("/jmap") || pathname.startsWith("/.well-known/jmap");
 }
+
+// Logged once per isolate (cold start) so the operator can see which Access mode the Worker is in
+// without a per-request log line. Never logs a secret — only the derived mode name.
+let accessModeLogged = false;
 
 export async function applyAccessGate(request: Request, env: CloudflareEnv, options: AccessGateOptions = {}): Promise<AccessGateResult> {
 	const accessEnv = env as unknown as AccessEnv;
 	const config = readAccessConfig(accessEnv);
+	if (!accessModeLogged) {
+		accessModeLogged = true;
+		const mode = config === null
+			? ((accessEnv.MAILFLARE_ACCESS_MODE ?? "").trim().toLowerCase() === "off" ? "off" : "fail-closed (unconfigured)")
+			: config === "misconfigured"
+				? "misconfigured"
+				: "on";
+		console.log("[mailflare] Cloudflare Access mode: " + mode);
+	}
 	const pathname = normalizeGatePath(new URL(request.url).pathname);
 	if (pathname === null) {
 		return {
@@ -380,10 +395,11 @@ export async function applyAccessGate(request: Request, env: CloudflareEnv, opti
 	}
 
 	// Only a navigation or an API call needs a fresh session. Subresource requests (static assets,
-	// avatars, the opaque mail frame) would otherwise mint a 30-day session each — and a Lax
-	// Set-Cookie is refused for cross-site subresources anyway. Pass them through with the verified
-	// identity, without minting.
-	if (!needsSession(request)) return { kind: "pass", request, userId: user.id };
+	// avatars, the opaque mail frame, RSC payloads) would otherwise mint a 30-day session each — and
+	// a Lax Set-Cookie is refused for cross-site subresources anyway. Pass them through with the
+	// verified identity, without minting. A session cookie that does not belong to the Access identity
+	// (a foreign or unusable user) is stripped here so the app never sees the other user.
+	if (!needsSession(request, pathname)) return { kind: "pass", request: stripSession(request), userId: user.id };
 
 	const token = await createSession(env, user.id);
 	await recordAuthActivity(env, { action: "auth.login", userId: user.id, request });

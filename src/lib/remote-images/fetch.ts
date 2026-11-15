@@ -210,16 +210,25 @@ export function isPublicAddress(address: string): boolean {
 	if (groups === null) return false;
 	if (groups.every((g) => g === 0)) return false; // :: (unspecified)
 	if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false; // ::1 (loopback)
+	// IPv4-compatible ::/96 embeds the IPv4 in the last 32 bits with a zero 96-bit prefix (RFC 4291, deprecated).
+	if (groups.slice(0, 6).every((g) => g === 0)) return isPublicIpv4(ipv4FromGroups(groups[6], groups[7]));
 	// IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::/96) embed an IPv4 in the last 32 bits.
 	const mapped = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff;
 	const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0;
 	if (mapped || nat64) return isPublicIpv4(ipv4FromGroups(groups[6], groups[7]));
+	// SIIT IPv4-translatable ::ffff:0:0/96 and the local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215)
+	// also embed the IPv4 in the last 32 bits, with bits 64..95 zeroed.
+	const siit = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0xffff && groups[5] === 0;
+	const nat64Local = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0;
+	if (siit || nat64Local) return isPublicIpv4(ipv4FromGroups(groups[6], groups[7]));
 	if (groups[0] === 0x2002) return isPublicIpv4(ipv4FromGroups(groups[1], groups[2])); // 6to4 2002::/16
 	if (groups[0] === 0x0100) return false; // discard-only 100::/64 (RFC 6666)
 	if (groups[0] === 0x2001 && groups[1] === 0x0db8) return false; // documentation 2001:db8::/32 (RFC 3849)
+	if (groups[0] === 0x2001 && groups[1] === 0x0000) return false; // Teredo 2001::/32 (RFC 4380)
 	const first = groups[0];
 	if ((first & 0xfe00) === 0xfc00) return false; // unique local fc00::/7
 	if ((first & 0xffc0) === 0xfe80) return false; // link-local fe80::/10
+	if ((first & 0xffc0) === 0xfec0) return false; // deprecated site-local fec0::/10
 	if ((first & 0xff00) === 0xff00) return false; // multicast ff00::/8
 	return true;
 }

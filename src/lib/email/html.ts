@@ -231,7 +231,7 @@ export function prepareEmailHtml(source: string, options: Options = {}) {
 	const base = template.content.querySelector("base[href]")?.getAttribute("href");
 	const resource = (value: string): string | null => {
 		if (/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(value)) return value;
-		if (!options.forOutgoing && /^\/api\/messages\/[^/]+\/attachments\/[^/?]+\?preview=1$/.test(value)) return value;
+		if (!options.forOutgoing && /^\/api\/messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+\?preview=1$/.test(value)) return value;
 		if (value.startsWith("#")) return value;
 		try {
 			const url = new URL(value, base || "https://invalid.invalid/");
