@@ -1,0 +1,9 @@
+# INC-20261115-010: placeholder string hashed with bcrypt in a unit test, not a credential
+d8ff1a77510358ae2f35d061ee4cb4687fca5e5fests/api-key-sha256.test.mjs:generic-api-key:129
+# INC-20261115-004..009: public WebAuthn authenticator AAGUIDs mapped to vendor names, not secrets
+b90d61a32a8706925e708fbdcc9611d68e738bff
+b90d61a32a8706925e708fbdcc9611d68e738bff
+b90d61a32a8706925e708fbdcc9611d68e738bff
+b90d61a32a8706925e708fbdcc9611d68e738bff
+b90d61a32a8706925e708fbdcc9611d68e738bff
+b90d61a32a8706925e708fbdcc9611d68e738bff
