@@ -21,7 +21,7 @@ const mocks = {
 	"@/lib/domains/catch-all-routing": "export async function ensureEmailRoutingCatchAllToWorker(){}",
 	"@/lib/domains/provision": "export const isManualZone=(z)=>z==='manual';export const shouldBindEmailCatchAllToWorker=()=>false;",
 	"@/lib/domains/sending-subdomain": "export async function ensureSendingSubdomain(){return {subdomain:globalThis.__subdomain};}",
-	"@/lib/domains/cloudflare-cleanup": "export async function deleteEmailRoutingRulesForDomain(){}",
+	"@/lib/domains/cloudflare-cleanup": "export async function deleteEmailRoutingRulesForDomain(){}export async function zoneHasForeignRoutingRules(){return false;}",
 	"@/lib/domains/mx-records": "export async function removeMxRecords(){}",
 	"@/lib/domains/adopt-zone": "export async function adoptCloudflareZone(env,d){return d;}",
 	"@/lib/domains/receiving-dns": "export async function listDomainMx(){return [];}export class MxConflictError extends Error{}",

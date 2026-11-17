@@ -37,10 +37,19 @@ import { runAccountRetention } from "./src/lib/accounts/deletion";
 import { runJmapChangeRetention } from "./src/lib/jmap/changes";
 import { runFollowUpReminders } from "./src/lib/follow-ups/service";
 import { runCalendarReminders } from "./src/lib/calendar/reminders";
+import { applyAccessGate, withAccessSessionCookie } from "./src/lib/auth/access/gate";
+import { buildCsp, withNonceCsp } from "./src/lib/security/headers";
+import { generateCspNonce } from "./src/lib/security/nonce";
 export { RealtimeHub } from "./src/lib/realtime/hub";
 
 export default {
-	async fetch(request: Request, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+	async fetch(incoming: Request, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+		// Cloudflare Access sign-in (ACCESS_TEAM_DOMAIN + ACCESS_AUD set): verify the Access JWT and
+		// bind it to a Mailflare session before anything else runs. See docs/zp-access.md.
+		const access = await applyAccessGate(incoming, withDatabase(withStorage(rawEnv)));
+		if (access.kind === "response") return access.response;
+		const request = access.kind === "pass" ? access.request : incoming;
+		const accessCookie = access.kind === "pass" ? access.setCookie : undefined;
 		// Reads go through a D1 session anchored at the client's bookmark cookie so D1 can serve
 		// them from read replicas; email/queue/scheduled below keep primary reads on purpose.
 		const d1Session = withD1ReadSession(rawEnv, request);
@@ -65,8 +74,21 @@ export default {
 			return hub.fetch(hubRequest);
 		}
 
-		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(request, env, ctx));
-		return withD1BookmarkCookie(request, response, d1Session?.session);
+		// Nonce-based CSP for document responses. Next reads the nonce from the request's CSP header and
+		// stamps its inline bootstrap scripts with it; the root layout reads `x-mf-csp-nonce` for its own two.
+		const isDocument = request.method === "GET" || request.method === "HEAD";
+		const nonce = isDocument ? generateCspNonce() : null;
+		const csp = nonce ? buildCsp(nonce) : null;
+		const renderRequest = csp ? (() => {
+			const next = new Request(request);
+			next.headers.set("x-mf-csp-nonce", nonce!);
+			next.headers.set("content-security-policy", csp);
+			return next;
+		})() : request;
+
+		const response = await runWithD1Session(d1Session?.session, () => vinextHandler.fetch(renderRequest, env, ctx));
+		const withCsp = csp ? withNonceCsp(response, csp) : response;
+		return withAccessSessionCookie(withD1BookmarkCookie(request, withCsp, d1Session?.session), accessCookie);
 	},
 
 	async email(message: ForwardableEmailMessage, rawEnv: CloudflareEnv, ctx: ExecutionContext) {

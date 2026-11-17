@@ -3,7 +3,7 @@ import { getDb } from "@/db";
 import { domains, mailboxes } from "@/db/schema";
 import { disableEmailRouting } from "@/lib/cloudflare-api";
 import { deleteDnsRecord } from "@/lib/cloudflare-dns";
-import { deleteEmailRoutingRulesForDomain } from "@/lib/domains/cloudflare-cleanup";
+import { deleteEmailRoutingRulesForDomain, zoneHasForeignRoutingRules } from "@/lib/domains/cloudflare-cleanup";
 import { removeMxRecords } from "@/lib/domains/mx-records";
 import { setupDomainDnsRecord } from "@/lib/domains/dns-setup";
 import { adoptCloudflareZone } from "@/lib/domains/adopt-zone";
@@ -46,7 +46,7 @@ export async function removeCloudflareReceiving(env: CloudflareEnv, domain: Doma
 	await removeCloudflareMx(env, domain);
 	const db = getDb(env);
 	const [otherDomainOnZone] = await db.select({ id: domains.id }).from(domains).where(and(eq(domains.zoneId, domain.zoneId), ne(domains.id, domain.id))).limit(1);
-	if (domain.routingEnabled && !otherDomainOnZone) await disableEmailRouting(env, domain.zoneId);
+	if (domain.routingEnabled && !otherDomainOnZone && !(await zoneHasForeignRoutingRules(env, domain.zoneId))) await disableEmailRouting(env, domain.zoneId);
 	await db.update(domains).set({ routingEnabled: false }).where(eq(domains.id, domain.id));
 }
 

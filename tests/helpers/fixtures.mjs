@@ -40,15 +40,18 @@ export function sqliteProxy({ schema = "", beforeQuery, afterQuery } = {}) {
 		beforeQuery?.(sql, sqlite);
 		const query = sqlite.prepare(sql);
 		let rows;
+		let meta;
 		if (method === "run") {
-			query.run(...params);
+			const info = query.run(...params);
 			rows = [];
+			// Mirror D1's result shape so app code reading `meta.changes` works in tests.
+			meta = { changes: Number(info.changes ?? 0) };
 		} else {
 			query.setReturnArrays(true);
 			rows = query.all(...params);
 		}
 		afterQuery?.(sql, sqlite);
-		return { rows };
+		return meta ? { rows, meta } : { rows };
 	});
 	return { db, sqlite };
 }

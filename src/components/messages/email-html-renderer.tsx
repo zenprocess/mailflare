@@ -4,18 +4,50 @@ import { useLanguage } from "@/components/language-provider";
 import { useEffect, useRef, useState } from "react";
 import { prepareReaderEmailHtml } from "@/lib/remote-images/reader";
 import { collapseQuotedEmailHtml } from "@/app/(dashboard)/inbox/[messageId]/quote-collapse-utils";
+import { buildMailFrameDocument, MAIL_FRAME_MESSAGE_SOURCE, parseMailFrameMessage } from "@/lib/remote-images/frame";
+import {
+	attachmentPreviewUrl,
+	fetchFrameImages,
+	MAX_FRAME_IMAGES,
+} from "./email-html-renderer-utils";
 
-const BASE_STYLE = `
-:host { display:block; min-width:0; isolation:isolate; contain:paint; }
-:host(.mf-dark) { filter:invert(1) hue-rotate(180deg); }
-:host(.mf-dark) img, :host(.mf-dark) video, :host(.mf-dark) picture { filter:invert(1) hue-rotate(180deg); }
-.email-quote-toggle { margin-top:1.4em; }
-.email-quote-toggle > summary { cursor:pointer; list-style:none; width:26px; border-radius:20px; background:#ececec; text-align:center; }
-.email-quote-toggle > summary::-webkit-details-marker { display:none; }
-.email-quote-toggle > summary::before { content:'•••'; }
-.email-quote-content { display:flow-root; }
-:host(.mf-dense) p { margin-top:0; }
-`;
+const BLANK_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+// Remote images are rewritten by prepareReaderEmailHtml to this cookie-less-able proxy path.
+const REMOTE_PROXY_PATH = /\/api\/remote-images\?url=[^"'\s<>&]+/;
+
+function collectRemoteProxyPaths(html: string): string[] {
+	const seen = new Set<string>();
+	for (const match of html.matchAll(new RegExp(REMOTE_PROXY_PATH.source, "g"))) seen.add(match[0]);
+	return [...seen];
+}
+
+/**
+ * Replaces cid preview URLs and remote-image proxy paths with a blank placeholder that the frame
+ * later fills from a blob: URL the parent posts. Both are served on the app origin with the session
+ * cookie, which the sandboxed (opaque-origin) frame cannot send, so the parent fetches them here.
+ */
+function collectBlobImages(html: string, remotePaths: string[]): { html: string; urls: string[] } {
+	const urls: string[] = [];
+	const remote = new Set(remotePaths);
+	const template = document.createElement("template");
+	template.innerHTML = html;
+	for (const img of template.content.querySelectorAll("img")) {
+		const src = img.getAttribute("src") ?? "";
+		// Attachment previews are rebuilt from the validated ids, never fetched from the raw src,
+		// so a crafted src (with ".." segments) cannot make the reader's browser GET another path.
+		const attachmentUrl = attachmentPreviewUrl(src);
+		if (!attachmentUrl && !remote.has(src)) continue;
+		const fetchUrl = attachmentUrl ?? src;
+		let index = urls.indexOf(fetchUrl);
+		if (index === -1) {
+			index = urls.length;
+			urls.push(fetchUrl);
+		}
+		img.setAttribute("data-mf-blob", String(index));
+		img.setAttribute("src", BLANK_IMAGE);
+	}
+	return { html: template.innerHTML, urls };
+}
 
 export function EmailHtmlRenderer({ html, className, dense = false, preserveLeadingQuote = false, autoAllowRemote = false, onAllowRemote }: {
 	html: string; className?: string;
@@ -29,54 +61,70 @@ export function EmailHtmlRenderer({ html, className, dense = false, preserveLead
 }) {
 	const { t } = useLanguage();
 	const quoteToggleLabel = t("message.quote.toggle");
-	const host = useRef<HTMLDivElement>(null);
+	const frameRef = useRef<HTMLIFrameElement>(null);
 	const [choice, setChoice] = useState<{ source: string; allow: boolean } | null>(null);
 	const [hasRemote, setHasRemote] = useState(false);
+	const [dark, setDark] = useState(false);
+	const [height, setHeight] = useState<number | null>(null);
+	const [srcdoc, setSrcdoc] = useState<string>("");
+	const [blobUrls, setBlobUrls] = useState<string[]>([]);
 	const allowRemote = choice?.source === html ? choice.allow : autoAllowRemote;
-	// Mail is authored for white paper. Under the dark theme it is inverted
-	// (images inverted back) instead of glaring as a white slab.
+
+	// Track dark theme; the frame content is a separate document, so re-render the srcdoc on change.
 	useEffect(() => {
 		const root = document.documentElement;
-		const sync = () => host.current?.classList.toggle("mf-dark", root.classList.contains("dark"));
+		const sync = () => setDark(root.classList.contains("dark"));
 		sync();
 		const observer = new MutationObserver(sync);
 		observer.observe(root, { attributes: true, attributeFilter: ["class"] });
 		return () => observer.disconnect();
 	}, []);
+
 	useEffect(() => {
-		if (!host.current) return;
-		host.current.dir = document.documentElement.dir || "ltr";
-		const root = host.current.shadowRoot ?? host.current.attachShadow({ mode: "open" });
-		const prepared = prepareReaderEmailHtml(html, {
-			reader: true,
-			allowRemote,
-			proxyRemote: document.documentElement.dataset.remoteImageProxy !== "disabled",
-		});
-		setHasRemote(prepared.hasRemote);
-		const base = document.createElement("style");
-		base.textContent = `${BASE_STYLE}\n${prepared.rootTag} { display:block; font:14px/1.5 Arial,sans-serif; color:#202124; background:#fff; color-scheme:light; }\n${prepared.bodyTag} { display:block; }\n:host(.mf-dark) ${prepared.rootTag} { background:transparent; }\n:host(.mf-dense) ${prepared.rootTag} { background:transparent; }`;
-		const content = document.createElement("template");
-		content.innerHTML = collapseQuotedEmailHtml(prepared.html, preserveLeadingQuote, quoteToggleLabel) ?? "";
-		root.replaceChildren(base, content.content);
-		const mailBody = root.querySelector(prepared.bodyTag);
-		// An LTR scroller cannot reach left-side overflow from an RTL email.
-		if (mailBody) host.current.dir = window.getComputedStyle(mailBody).direction;
-		// Document fragment navigation does not automatically find IDs inside a shadow tree.
-		const navigate = (event: Event) => {
-			const target = event.target as Element | null;
-			const anchor = target?.closest("a[href]");
-			const href = anchor?.getAttribute("href");
-			if (!href?.startsWith("#")) return;
-			event.preventDefault();
-			try {
-				const id = decodeURIComponent(href.slice(1));
-				const destination = root.getElementById(id) ?? Array.from(root.querySelectorAll("a[name]")).find(node => node.getAttribute("name") === id);
-				destination?.scrollIntoView({ block: "start" });
-			} catch { /* Ignore malformed fragments. */ }
+		let cancelled = false;
+		const proxyRemote = document.documentElement.dataset.remoteImageProxy !== "disabled";
+		(async () => {
+			const prepared = prepareReaderEmailHtml(html, { reader: true, allowRemote, proxyRemote });
+			if (cancelled) return;
+			setHasRemote(prepared.hasRemote);
+			let bodyHtml = collapseQuotedEmailHtml(prepared.html, preserveLeadingQuote, quoteToggleLabel) ?? "";
+			// Remote content is only rewritten to the proxy after the reader asks; until then there is
+			// nothing to collect, so remote images load only after the reader asks.
+			const remotePaths = allowRemote ? collectRemoteProxyPaths(bodyHtml) : [];
+			const blobs = collectBlobImages(bodyHtml, remotePaths);
+			if (cancelled) return;
+			setBlobUrls(blobs.urls);
+			setSrcdoc(buildMailFrameDocument(blobs.html, dark, dense));
+		})();
+		return () => { cancelled = true; };
+	}, [html, allowRemote, dark, preserveLeadingQuote, quoteToggleLabel, dense]);
+
+	// Height reports from the frame, accepted only from this iframe with a well-formed, clamped shape.
+	useEffect(() => {
+		const onMessage = (event: MessageEvent) => {
+			if (event.source !== frameRef.current?.contentWindow) return;
+			const parsed = parseMailFrameMessage(event.data);
+			if (parsed) setHeight(parsed.height);
 		};
-		root.addEventListener("click", navigate);
-		return () => root.removeEventListener("click", navigate);
-	}, [html, allowRemote, preserveLeadingQuote, quoteToggleLabel]);
+		window.addEventListener("message", onMessage);
+		return () => window.removeEventListener("message", onMessage);
+	}, []);
+
+	// Fetch cid attachments and remote images with the session cookie (the parent origin has it) and
+	// hand the bytes to the frame, which creates blob: URLs in its own (opaque) origin. The fetch is
+	// bounded: at most MAX_FRAME_IMAGES images, MAX_IMAGE_BYTES per image and MAX_TOTAL_IMAGE_BYTES
+	// in total, with each Blob re-wrapped in an allow-listed image MIME so no non-image (SVG, HTML)
+	// type can ever reach the frame as active content.
+	const handleFrameLoad = () => {
+		const frame = frameRef.current;
+		if (!frame || !blobUrls.length) return;
+		void (async () => {
+			const urls = blobUrls.slice(0, MAX_FRAME_IMAGES);
+			const blobs = await fetchFrameImages(urls, (url) => fetch(url));
+			if (blobs.length) frame.contentWindow?.postMessage({ source: MAIL_FRAME_MESSAGE_SOURCE, type: "blobs", blobs }, "*");
+		})();
+	};
+
 	return <div className={`min-w-0 max-w-full ${className ?? ""}`}>
 		{hasRemote && <div className="mb-2 flex justify-end">
 			<button type="button" aria-pressed={allowRemote} className="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
@@ -87,6 +135,16 @@ export function EmailHtmlRenderer({ html, className, dense = false, preserveLead
 				{allowRemote ? null : t("message.allowRemote")}
 			</button>
 		</div>}
-		<div className={`max-w-full overflow-x-auto${dense ? " mf-dense" : ""}`} ref={host} />
+		<iframe
+			ref={frameRef}
+			title="message"
+			className={`block w-full max-w-full border-0${dense ? " mf-dense" : ""}`}
+			style={{ height: height != null ? `${height}px` : undefined }}
+			srcDoc={srcdoc}
+			sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+			referrerPolicy="no-referrer"
+			onLoad={handleFrameLoad}
+			tabIndex={-1}
+		/>
 	</div>;
 }

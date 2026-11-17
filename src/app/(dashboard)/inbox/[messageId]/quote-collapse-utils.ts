@@ -2,7 +2,11 @@ export function collapseQuotedEmailHtml(html: string | null, preserveLeadingQuot
 	if (!html) return null;
 	const template = window.document.createElement("template");
 	template.innerHTML = html;
-	const document = { body: template.content, createElement: window.document.createElement.bind(window.document) };
+	// Wrapper elements are built in an inert document so that adopting a mail <img> (cid preview or
+	// remote-image proxy path) into a wrapper never starts a load in the live document. Only the
+	// serialised innerHTML is returned, so the inert document's owners do not matter.
+	const inert = window.document.implementation.createHTMLDocument("");
+	const document = { body: template.content, createElement: inert.createElement.bind(inert) };
 
 	let skippedLeading = false;
 	for (const blockquote of Array.from(document.body.querySelectorAll("blockquote"))) {

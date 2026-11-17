@@ -97,6 +97,48 @@ Install Mailflare for me from https://github.com/hieunc229/mailflare on my Cloud
 
 Token permissions and more options: [deployment guide](docs/deployment.md#deploy-with-an-ai-coding-agent).
 
+### Deploy through the ZenInfra registry
+
+The Zen Labs estate deploys Workers through `POST https://consul.zp.digital/workers`, which takes a **single ESM script** — not the 797 code-split modules `vp build` emits. Bundle first, then declare the whole binding list in the deploy request.
+
+```bash
+npm run build                      # vp build -> dist/server/index.js + dist/client
+node scripts/bundle-worker.mjs     # dist/mailflare-worker.mjs (one ESM file) + size
+```
+
+**Bindings to declare** (the registry takes them verbatim; no `WORKER_SELF_REFERENCE`):
+
+- D1 `DB` (`d1`), R2 `BUCKET` (`r2_bucket`), three queue producers `INBOUND_QUEUE`/`OUTBOUND_QUEUE`/`AGENT_QUEUE` (`mailflare-inbound`/`-outbound`/`-agent`) and their consumers (script `mailflare`).
+- Durable Object `REALTIME` (`class_name: RealtimeHub`).
+- `send_email` `EMAIL`, Workers AI `AI`, Images `IMAGES`.
+- Three rate-limit bindings `LOGIN_RATE_LIMIT`/`DEVICE_LOGIN_RATE_LIMIT`/`AGENT_RATE_LIMIT` (pick namespace ids 2001+ to avoid konsilo's 1001-1005).
+- `plain_text` vars: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_SETUP_EMAILS`, `MAILFLARE_SETUP_DOMAINS`, `APP_URL`, `SPAM_DOMAIN_AGE_CHECK=off`.
+- Two cron triggers `0 2 * * *` and `*/5 * * * *`, `observability`, plus `assets` + `assets_config` (pass `dist/client/_headers` in `assets_config`).
+
+**One-time Durable Object migration.** Send `migrations:{"new_tag":"v1","new_sqlite_classes":["RealtimeHub"]}` **only on the first deploy**; a second send fails with Cloudflare error 10079. Check `GET /workers/durable-objects` for `mailflare_RealtimeHub` first.
+
+**Values only the operator can supply** (names only — never put values in chat):
+
+- The zone-scoped `CF_TOKEN` (one pilot zone only; Zone Read, DNS Edit, Zone Settings Edit, Email Routing Rules Edit, Email Sending Edit — never All zones, never the Global API Key). See `docs/zp-hardening.md` "Minimal CF_TOKEN".
+- The Cloudflare Access application + its `AUD`, `ACCESS_TEAM_DOMAIN`, and `ACCESS_SETUP_EMAILS` (who may open `/setup`).
+- Turnstile site key (build time `NEXT_PUBLIC_TURNSTILE_SITE_KEY`) and secret key (`TURNSTILE_SECRET_KEY`).
+- `MAILFLARE_SETUP_DOMAINS` (the pilot mail domain) and the pilot subdomain itself.
+
+**Access and remote-image options** (names only):
+
+- `MAILFLARE_ACCESS_MODE` — set it to `off` only to run without Cloudflare Access. The default is **fail-closed**: with `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` unset and no `MAILFLARE_ACCESS_MODE=off`, every request answers 503 "Access not configured".
+- `REMOTE_IMAGES_HMAC_SECRET` — **must stay unset**. The signed-URL path of `/api/remote-images` was removed; the parent fetches proxied images with the session cookie and posts Blobs to the sandboxed reader, so no signing secret exists.
+- `ACCESS_AUTO_PROVISION` and `ACCESS_ALLOW_PASSWORD_LOGIN` **must stay unset** for the pilot.
+
+**`keep_vars: true` and Access-only limits** (names only):
+
+- `wrangler.jsonc` sets `keep_vars: true`, so **every plain-text var must be resent in full on every deploy** — a var set once in the dashboard survives a deploy that omits it. After each deploy, read the Worker's vars back and assert `MAILFLARE_ACCESS_MODE` is **absent** and both `ACCESS_*` vars are present.
+- `MAILFLARE_ACCESS_MODE` must stay **absent** (never `off`), or the Access gate is disabled and the console falls back to open sign-in.
+- Behind Cloudflare Access, the **open-tracking pixel** (`/api/i/<token>.gif`), **shared-file links** (`/api/shared-files/[id]`), the **booking pages** and **JMAP / API-key clients** cannot work: Access blocks them at the edge, and the fail-closed gate exempts only `/api/inbound`. Leave read receipts and shared links off so users are not misled.
+- The Access gate exists **only in the Worker runtime** (`worker.ts`). The Node/Docker runtime (`server/`) has no gate, so a self-hosted build falls back to upstream's open first run — **do not run the Node runtime behind Access**.
+
+The D1 schema is applied from `/api/setup/prepare` — do not run remote migrations. The worker name must stay `mailflare` (routing rules hard-code it). See `docs/zp-hardening.md` and `docs/zp-access.md` for the full pilot checklist.
+
 ### Self-host with Docker
 
 Runs as one container on any server, with SQLite and local files.
@@ -122,6 +164,8 @@ Add your Cloudflare credentials to `.dev.vars`, then open [localhost:3000](http:
 - `npm run build`: build the Worker
 - `npm run deploy`: build and deploy
 - `npm run lint`: lint and type check
+
+> **Build with `NODE_ENV` unset or `production`.** `process.env.NODE_ENV` is a build-time constant that decides whether `'unsafe-inline'` and `'unsafe-eval'` are folded into the script-src of the static CSP fallback (`src/lib/security/headers.ts`). A production build (`NODE_ENV` unset or `production`) folds both to the empty string; only then does the deployed Worker serve HTML documents with the strict nonce CSP and no `'unsafe-inline'`. Do not build with `NODE_ENV=development` for a deployment.
 
 A schema change needs a migration for each database type. See [Databases](docs/databases.md#migrations).
 

@@ -5,6 +5,7 @@ import { getDb } from "@/db";
 import { mailboxes, users } from "@/db/schema";
 import { hashPassword, PASSWORDLESS_PASSWORD_HASH } from "@/lib/auth/password";
 import { hasAdminAccount } from "@/lib/auth/setup";
+import { insertPrimaryAdmin } from "@/lib/auth/primary-admin";
 import { SESSION_COOKIE } from "@/lib/auth/session";
 import { createEnrollmentGrant, SETUP_COOKIE } from "@/lib/auth/webauthn/grants";
 import { newId } from "@/lib/ids";
@@ -43,6 +44,11 @@ export async function POST(request: Request) {
 	}
 
 	const domainName = firstRunParsed.data.domain.toLowerCase().trim();
+	// Zen Labs fork (MAILFLARE-REVIEW.md 8.4): the first-run domain may be pinned by the operator.
+	const allowedSetupDomains = (env.MAILFLARE_SETUP_DOMAINS ?? "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
+	if (allowedSetupDomains.length > 0 && !allowedSetupDomains.includes(domainName)) {
+		return NextResponse.json({ error: "This domain is not allowed for setup" }, { status: 400 });
+	}
 	const username = firstRunParsed.data.username.toLowerCase().trim();
 	const email = `${username}@${domainName}`;
 	const password = firstRunParsed.data.password;
@@ -55,17 +61,18 @@ export async function POST(request: Request) {
 	}
 
 	const userId = newId("usr");
-	await db.insert(users).values({
+	// Zen Labs fork (MAILFLARE-REVIEW.md 8.4): first-run creation is atomic. Two concurrent
+	// setups race on the old select-then-insert; the conditional insert below inserts exactly one.
+	const created = await insertPrimaryAdmin(db, {
 		id: userId,
-		// Opening a message must not tell the sender; the column default predates this and stays "allow".
-		remoteContentMode: "ask",
 		email,
-		resetEmail: firstRunParsed.data.resetEmail,
+		resetEmail: firstRunParsed.data.resetEmail ?? null,
 		passwordHash: usePasskey ? PASSWORDLESS_PASSWORD_HASH : hashPassword(password!),
 		name,
-		role: "admin",
-		isPrimaryAdmin: true,
 	});
+	if (!created) {
+		return NextResponse.json({ error: "Registration is closed after the first account is created" }, { status: 403 });
+	}
 
 	// Create the setup grant before touching DNS. If it cannot be written, the
 	// account has no usable sign-in method and registration is already closed,
@@ -92,7 +99,9 @@ export async function POST(request: Request) {
 		const added = await addDomainForUser(env, userId, domainName, {
 			enableRouting: true,
 			enableSending: firstRunParsed.data.enableSending ?? true,
-			replaceMxRecords: firstRunParsed.data.replaceMxRecords,
+			// Zen Labs fork (MAILFLARE-REVIEW.md 2/8.6): first run never deletes existing MX records;
+			// replacing a live zone's MX is an operator decision taken later, in the domain settings.
+			replaceMxRecords: false,
 			skipDns: firstRunParsed.data.skipDns,
 		});
 		const domain = added.domain;
