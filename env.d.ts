@@ -12,6 +12,8 @@ interface CloudflareEnv {
 	HYPERDRIVE?: { connectionString: string };
 	EMAIL: SendEmail;
 	BUCKET: R2Bucket;
+	/** Zen Labs fork: separate R2 bucket for database backups (falls back to BUCKET). */
+	BACKUP_BUCKET?: R2Bucket;
 	INBOUND_QUEUE: Queue<import("./src/lib/email/inbound").InboundQueueMessage>;
 	AGENT_QUEUE?: Queue<{ kind: "agent.draft"; jobId: string }>;
 	AI?: Ai;
@@ -84,6 +86,8 @@ interface CloudflareEnv {
 	ACCESS_EMAIL_MAP?: string;
 	/** Comma/space separated domains the first-run registration may use; empty allows any zone the token sees. */
 	MAILFLARE_SETUP_DOMAINS?: string;
+	/** Zen Labs fork: this Worker's script name, the target of the Email Routing rules (default "mailflare"). */
+	MAILFLARE_WORKER_NAME?: string;
 	GITHUB_UPDATE_TOKEN?: string;
 	GITHUB_UPDATE_REF?: string;
 	GITHUB_UPDATE_REPO?: string;

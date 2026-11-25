@@ -3,7 +3,7 @@ import { getDb } from "@/db";
 import { backups } from "@/db/schema";
 import { exportDatabaseRecords } from "./export";
 import { createScheduledBackupIfDue, getBackupSettings } from "./service";
-import { BACKUP_PREFIX, createBackupFilename } from "./utils";
+import { BACKUP_PREFIX, createBackupFilename, getBackupBucket } from "./utils";
 
 export async function runDatabaseBackup(env: CloudflareEnv, backupId: string): Promise<void> {
 	const db = getDb(env);
@@ -17,7 +17,7 @@ export async function runDatabaseBackup(env: CloudflareEnv, backupId: string): P
 		const content = await exportDatabaseRecords(env.DB, settings?.excludedTableGroups ?? []);
 		const filename = createBackupFilename(new Date());
 		const r2Key = `${BACKUP_PREFIX}/${backupId}/${filename}`;
-		const object = await env.BUCKET.put(r2Key, content, {
+		const object = await getBackupBucket(env).put(r2Key, content, {
 			httpMetadata: { contentType: "application/json" },
 			customMetadata: { backupId },
 		});
@@ -69,7 +69,7 @@ export async function deleteExpiredBackups(env: CloudflareEnv): Promise<number> 
 			),
 		);
 	for (const backup of expired) {
-		if (backup.r2Key) await env.BUCKET.delete(backup.r2Key);
+		if (backup.r2Key) await getBackupBucket(env).delete(backup.r2Key);
 		await db.delete(backups).where(eq(backups.id, backup.id));
 	}
 	return expired.length;

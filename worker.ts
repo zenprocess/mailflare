@@ -40,10 +40,16 @@ import { runCalendarReminders } from "./src/lib/calendar/reminders";
 import { applyAccessGate, withAccessSessionCookie } from "./src/lib/auth/access/gate";
 import { buildCsp, withNonceCsp } from "./src/lib/security/headers";
 import { generateCspNonce } from "./src/lib/security/nonce";
+import { setEmailWorkerName } from "./src/lib/cloudflare-api-utils";
 export { RealtimeHub } from "./src/lib/realtime/hub";
+
+function bindWorkerName(env: CloudflareEnv) {
+	setEmailWorkerName(env.MAILFLARE_WORKER_NAME);
+}
 
 export default {
 	async fetch(incoming: Request, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+		bindWorkerName(rawEnv);
 		// Cloudflare Access sign-in (ACCESS_TEAM_DOMAIN + ACCESS_AUD set): verify the Access JWT and
 		// bind it to a Mailflare session before anything else runs. See docs/zp-access.md.
 		const access = await applyAccessGate(incoming, withDatabase(withStorage(rawEnv)));
@@ -92,6 +98,7 @@ export default {
 	},
 
 	async email(message: ForwardableEmailMessage, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+		bindWorkerName(rawEnv);
 		const env = withDatabase(withStorage(rawEnv));
 		try {
 			if (message.rawSize > 25 * 1024 * 1024) {
@@ -146,6 +153,7 @@ export default {
 	},
 
 	async queue(batch: MessageBatch, rawEnv: CloudflareEnv): Promise<void> {
+		bindWorkerName(rawEnv);
 		const env = withDatabase(withStorage(rawEnv));
 		for (const msg of batch.messages) {
 			try {
@@ -176,6 +184,7 @@ export default {
 	},
 
 	async scheduled(controller: ScheduledController, rawEnv: CloudflareEnv, ctx: ExecutionContext) {
+		bindWorkerName(rawEnv);
 		const env = withDatabase(withStorage(rawEnv));
 		if (controller.cron === "0 2 * * *") ctx.waitUntil(runScheduledDatabaseBackup(env, new Date(controller.scheduledTime)));
 		ctx.waitUntil(runAgentMaintenance(env));

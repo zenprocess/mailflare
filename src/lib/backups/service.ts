@@ -3,7 +3,7 @@ import { getDb } from "@/db";
 import { backups, backupSettings } from "@/db/schema";
 import { newId } from "@/lib/ids";
 import type { BackupScheduleType, BackupTableGroupId } from "./types";
-import { BACKUP_SETTINGS_ID, getUtcDayBounds, isBackupDue } from "./utils";
+import { BACKUP_SETTINGS_ID, getBackupBucket, getUtcDayBounds, isBackupDue } from "./utils";
 import { parseExcludedBackupTableGroups } from "./table-groups";
 
 export async function getBackupSettings(env: CloudflareEnv) {
@@ -81,7 +81,7 @@ export async function deleteBackup(env: CloudflareEnv, id: string): Promise<bool
 	if (backup.status === "queued" || backup.status === "running") {
 		throw new Error("A backup in progress cannot be deleted");
 	}
-	if (backup.r2Key) await env.BUCKET.delete(backup.r2Key);
+	if (backup.r2Key) await getBackupBucket(env).delete(backup.r2Key);
 	await db.delete(backups).where(eq(backups.id, id));
 	return true;
 }
