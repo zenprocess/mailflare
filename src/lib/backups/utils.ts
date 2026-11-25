@@ -3,6 +3,15 @@ import type { BackupScheduleType, DatabaseBackupDocument, DatabaseRecord } from 
 export const BACKUP_SETTINGS_ID = "default";
 export const BACKUP_PREFIX = "backups/database";
 
+/**
+ * Zen Labs fork (MAILFLARE-REVIEW.md 8.8): database backups go to a separate R2 bucket
+ * (binding BACKUP_BUCKET) so losing or wiping the mail bucket does not take the backups with it.
+ * Without the binding the upstream behaviour (same bucket as raw mail) is kept.
+ */
+export function getBackupBucket(env: CloudflareEnv): R2Bucket {
+	return env.BACKUP_BUCKET ?? env.BUCKET;
+}
+
 export function isBackupDue(
 	scheduleType: BackupScheduleType,
 	scheduleValue: number | null,

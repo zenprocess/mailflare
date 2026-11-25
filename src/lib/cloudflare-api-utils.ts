@@ -63,6 +63,21 @@ export function getCloudflareAuthHint(errors: CfApiError[], path = "") {
 	return " Verify CF_TOKEN with `curl https://api.cloudflare.com/client/v4/user/tokens/verify -H \"Authorization: Bearer <token>\"`. Use the token secret value without `Bearer`, or use CF_API_KEY plus CF_EMAIL for a Global API Key.";
 }
 
+/**
+ * Zen Labs fork: the Worker that Email Routing rules point at. Upstream hard-codes "mailflare";
+ * the estate runs more than one instance (konsilo's "mailflare", ARQ's "arq-mail-pre"), so the
+ * Worker entry sets it from the MAILFLARE_WORKER_NAME var on every invocation. An unset or
+ * malformed value keeps the upstream default.
+ */
+const WORKER_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const WORKER_NAME_KEY = "__MAILFLARE_WORKER_NAME__";
+
+export function setEmailWorkerName(name: string | undefined | null): void {
+	const value = typeof name === "string" ? name.trim() : "";
+	(globalThis as Record<string, unknown>)[WORKER_NAME_KEY] = WORKER_NAME_PATTERN.test(value) ? value : undefined;
+}
+
 export function getEmailWorkerName(): string {
-	return "mailflare";
+	const value = (globalThis as Record<string, unknown>)[WORKER_NAME_KEY];
+	return typeof value === "string" && WORKER_NAME_PATTERN.test(value) ? value : "mailflare";
 }
